@@ -6,7 +6,7 @@ from matplotlib.transforms import IdentityTransform
 import tifffile
 import numpy as np
 
-handle = tifffile.imread("X2025-06-19_22.14.45_Xlzso-NO3-3_r1_82_000.tif")
+handle = tifffile.imread("data/X2025-06-19_22.14.45_Xlzso-NO3-3_r1_82_000.tif")
 
 frames, height, width = handle.shape
 
@@ -25,7 +25,11 @@ flat_indices = np.argsort(magnitude_spectrum.ravel())[-ammount:]
 coords = np.column_stack(np.unravel_index(flat_indices, magnitude_spectrum.shape))
 
 fig, ax = plt.subplots()
-#ax.imshow(magnitude_spectrum, cmap='gray')
+ax.imshow(magnitude_spectrum, cmap='gray')
+
+
+
+plt.show()
 
 for y, x in coords:
     circle = patches.Circle((x, y), radius=20,
@@ -55,9 +59,7 @@ for n, frame in enumerate(handle):
 
 print("did something else")
 
-
-
-#plt.show()
+#hey Johannes, i just changed something
 
 
 
