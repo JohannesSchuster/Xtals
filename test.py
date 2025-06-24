@@ -35,6 +35,21 @@ for y, x in coords:
     circle.set_transform(ax.transData + plt.matplotlib.transforms.ScaledTranslation(
         0, 0, ax.figure.dpi_scale_trans))  # To keep center in data coords
     #ax.add_patch(circle)
+cx = width / 2
+cy = height / 2
+y, x = coords[0]
+
+R = np.sqrt((x-cx)**2 + (y-cx)**2) 
+
+pixel_scale = 0.7891 # Angs/pix
+
+for frame in handle:
+    f = np.fft.fft2(frame)    
+    fshift = np.fft.fftshift(f)
+    magnitude_spectrum = 40*np.log(np.abs(fshift))
+    value = magnitude_spectrum[x][y]
+
+
 
 
 plt.show()
