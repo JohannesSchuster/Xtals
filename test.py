@@ -25,7 +25,7 @@ flat_indices = np.argsort(magnitude_spectrum.ravel())[-ammount:]
 coords = np.column_stack(np.unravel_index(flat_indices, magnitude_spectrum.shape))
 
 fig, ax = plt.subplots()
-ax.imshow(magnitude_spectrum, cmap='gray')
+#ax.imshow(magnitude_spectrum, cmap='gray')
 
 for y, x in coords:
     circle = patches.Circle((x, y), radius=20,
@@ -37,22 +37,27 @@ for y, x in coords:
     #ax.add_patch(circle)
 cx = width / 2
 cy = height / 2
-y, x = coords[0]
+y, x = coords[1800]
 
 R = np.sqrt((x-cx)**2 + (y-cx)**2) 
 
 pixel_scale = 0.7891 # Angs/pix
 
-for frame in handle:
+file = open("results.txt", "w")
+
+for n, frame in enumerate(handle):
     f = np.fft.fft2(frame)    
     fshift = np.fft.fftshift(f)
     magnitude_spectrum = 40*np.log(np.abs(fshift))
     value = magnitude_spectrum[x][y]
+    file.write(f"{n}, {x}, {y}, {value}\n")
+
+
+print("did something else")
 
 
 
-
-plt.show()
+#plt.show()
 
 
 
