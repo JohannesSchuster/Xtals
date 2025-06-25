@@ -1,7 +1,7 @@
 import os
 import tifffile as tf
 
-class BaseImageHandler:
+class BaseFramesHandler:
     def __init__(self):
         self.current_frame = 0
         self.frames = []
@@ -18,7 +18,7 @@ class BaseImageHandler:
         index = min(max(0, index), self.frame_count() - 1)
         self.current_frame = index
 
-class FileImageHandler(BaseImageHandler):
+class FileFramesHandler(BaseFramesHandler):
     def __init__(self, filepath):
         super().__init__()
         self.filepath = filepath
@@ -27,5 +27,6 @@ class FileImageHandler(BaseImageHandler):
     def load(self):
         with tf.imread(self.filepath) as image:
             self.frames = [frame for frame in image]
+
 
     
