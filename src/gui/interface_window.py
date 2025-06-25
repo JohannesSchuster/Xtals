@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import QMainWindow, QSlider, QVBoxLayout, QWidget, QFileDialog, QApplication
 from PyQt5.QtCore import Qt
 from image_handler import ImageHandler
-from display_widget import DisplayWidget
+from src.gui.display_widget import DisplayWidget
 
 class InterfaceWindow(QMainWindow):
     def __init__(self, filepath=None):
@@ -12,7 +12,7 @@ class InterfaceWindow(QMainWindow):
             filepath, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "TIFF Files (*.tif *.tiff);;All Files (*)")
         self.image_handler = ImageHandler(filepath)
 
-        self.display = DisplayWidget(self.image_handler)
+        self.display = DisplayWidget(self.image_handler, fft=True)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
