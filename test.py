@@ -379,7 +379,12 @@ class PeakFinderWidget:
     def save_file(): pass
     def save_file_as(self): pass
 
-    def continue_fn(self): pass
+    def continue_fn(self): 
+        # write out the coordinates to a file or continue processing
+        # extract pixel boxes around the peaks in coordintes
+        # fit a 2D Gaussian to the peaks in each Frame of the FFT image
+        # Take the aplitudes vs. Frame #
+        pass
 
     def show_about(self):
         tk.messagebox.showinfo(
