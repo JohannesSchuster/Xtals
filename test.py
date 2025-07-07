@@ -1,18 +1,15 @@
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.transforms import IdentityTransform
-from skimage.feature import peak_local_max
-
 import tifffile
-import numpy as np
 import tkinter as tk
 from tkinter import ttk
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from tkinter import filedialog
 import os
 import threading
+import numpy as np
+import sys
+
 from display import ImageDisplay
 from display import ImageHandler
+from display import HistogramDisplay
 from peak_finder import PeakFinder, RectMask, CircleMask, PolyMask
 from dataclasses import dataclass, field
 from typing import Optional, Any
@@ -21,26 +18,33 @@ from typing import Optional, Any
 class State:
     handle: Optional[Any] = None
     filename: Optional[str] = None
-    fig: Optional[Any] = None
+    #fig: Optional[Any] = None
+    black_level: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=0))
+    white_level: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=255))
 
 @dataclass
 class PeakFinderParams:
     ammount: tk.IntVar = field(default_factory=lambda: tk.IntVar(value=600))
-    cutoff: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=0.74))
+    cutoff: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=200))
     R: tk.IntVar = field(default_factory=lambda: tk.IntVar(value=150))
     LINE: tk.IntVar = field(default_factory=lambda: tk.IntVar(value=20))
+
+@dataclass
+class PeakFinderCache:
+    coordinates: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
 
 # --- Widget logic ---
 class PeakFinderWidget:
     def __init__(self, root):
         self.root = root
         self.root.title('Peak Finder Widget')
-        self.peak_finder_params = PeakFinderParams()
         self.state = State()
-        # removed cached_image, cached_coordinates, cached_ammount
         self.image_handler = ImageHandler()
-        self.image_display = ImageDisplay(window_title='Image Display')
+        self.image_display = ImageDisplay()
+        self.hist_display = HistogramDisplay()
         self.peak_finder = PeakFinder()
+        self.peak_finder_params = PeakFinderParams()
+        self.peak_finder_cache = PeakFinderCache()
         self.masks = []  # type: list
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -48,7 +52,7 @@ class PeakFinderWidget:
     def _menubar(self):
         menubar = tk.Menu(self.root)
         filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="Load", command=self.load_file)
+        filemenu.add_command(label="Load", command=self.browse_file)
         filemenu.add_command(label="Save", command=self.save_file)
         filemenu.add_command(label="Save As", command=self.save_file_as)
         filemenu.add_separator()
@@ -60,52 +64,91 @@ class PeakFinderWidget:
         return menubar
     
     def _image_section(self, parent):
-        # File input and browse button
+        # Use vertical layout for the whole section
+        outer = ttk.Frame(parent)
+        outer.pack(fill='both', expand=True)
+
+        # File input and browse button (horizontal)
+        file_row = ttk.Frame(outer)
+        file_row.pack(fill='x', pady=2)
+        file_label = ttk.Label(file_row, text='')  # Empty label for alignment
+        file_label.pack(side='left', padx=(0, 4))
         self.file_path_var = tk.StringVar()
-        self.file_input = ttk.Entry(parent, textvariable=self.file_path_var, width=40)
-        self.file_input.grid(row=0, column=0, columnspan=2, sticky='ew', padx=(2,2))
+        self.file_input = ttk.Entry(file_row, textvariable=self.file_path_var, width=40)
+        self.file_input.pack(side='left', fill='x', expand=True, padx=(0, 2))
         self.file_input.bind('<Return>', lambda e: self.on_file_input())
         self.file_input.bind('<FocusOut>', lambda e: self.on_file_input())
-        self.browse_btn = ttk.Button(parent, text='Browse', command=self.browse_file)
-        self.browse_btn.grid(row=0, column=2, sticky='ew')
-        
-        # Image info labels
-        ttk.Label(parent, text='Info:').grid(row=1, column=0, sticky='e')
-        self.info_display = ttk.Label(parent, text='No image loaded')
-        self.info_display.grid(row=1, column=1, sticky='w', columnspan=2)
-        # A/px
-        ttk.Label(parent, text='A/px:').grid(row=2, column=0, sticky='e')
-        self.apx_var = tk.DoubleVar(value=1.0)
-        self.apx_entry = ttk.Entry(parent, textvariable=self.apx_var)
-        self.apx_entry.grid(row=2, column=1, sticky='nsew')
-        # Sum checkbox
-        self.display_sum = tk.BooleanVar(value=True)
-        self.sum_checkbox = ttk.Checkbutton(parent, text='Sum', variable=self.display_sum, command=self.on_sum_toggle)
-        self.sum_checkbox.grid(row=3, column=0, sticky='w', columnspan=3)
-        # Frame selection (hidden if sum is checked)
-        self.frame_section = ttk.Frame(parent)
-        ttk.Label(self.frame_section, text='Frame:').grid(row=0, column=0, sticky='e')
-        self.display_frame_idx = tk.IntVar(value=0)
-        self.frame_idx_entry = ttk.Entry(self.frame_section, textvariable=self.display_frame_idx, width=6)
-        self.frame_idx_entry.grid(row=0, column=1, sticky='nsew')
-        self.frame_section.grid(row=4, column=0, columnspan=3, sticky='ew')
-        # FFT checkbox
-        self.display_fft = tk.BooleanVar(value=True)
-        self.norm_checkbox = ttk.Checkbutton(parent, text='Calculate FFT', variable=self.display_fft)
-        self.norm_checkbox.grid(row=5, column=1, sticky='w')
-        # Show button
-        self.show_image_btn = ttk.Button(parent, text='Show', command=self.update_image_display)
-        self.show_image_btn.grid(row=6, column=0, columnspan=3, sticky='nsew', padx=(2,2))
-        self.update_frame_section_visibility()
+        self.browse_btn = ttk.Button(file_row, text='Browse', command=self.browse_file)
+        self.browse_btn.pack(side='left')
 
-    def update_frame_section_visibility(self):
+        # Info row (horizontal)
+        info_row = ttk.Frame(outer)
+        info_row.pack(fill='x', pady=2)
+        info_label = ttk.Label(info_row, text='Info:', anchor='e', width=9)
+        info_label.pack(side='left')
+        self.info_display = ttk.Label(info_row, text='No image loaded')
+        self.info_display.pack(side='left', padx=(4,0))
+
+        # A/px row (horizontal)
+        apx_row = ttk.Frame(outer)
+        apx_row.pack(fill='x', pady=2)
+        apx_label = ttk.Label(apx_row, text='A/px:', anchor='e', width=9)
+        apx_label.pack(side='left')
+        self.apx_var = tk.DoubleVar(value=1.0)
+        self.apx_entry = ttk.Entry(apx_row, textvariable=self.apx_var, width=9)
+        self.apx_entry.pack(side='left', padx=(4,0))
+
+        # Frame selector and sum checkbox (horizontal)
+        frame_row = ttk.Frame(outer)
+        frame_row.pack(fill='x', pady=2)
+        frame_label = ttk.Label(frame_row, text='Frame:', anchor='e', width=9)
+        frame_label.pack(side='left')
+        self.display_frame_idx = tk.IntVar(value=0)
+        self.frame_slider = ttk.Scale(frame_row, from_=0, to=0, orient='horizontal', variable=self.display_frame_idx)
+        self.frame_slider.pack(side='left', fill='x', expand=True, padx=(4,2))
+        self.frame_slider.config(command=lambda val: self.display_frame_idx.set(int(float(val))))
+        self.frame_idx_label = ttk.Label(frame_row, textvariable=self.display_frame_idx, width=4)
+        self.frame_idx_label.pack(side='left', padx=(2,2))
+        self.display_sum = tk.BooleanVar(value=True)
+        self.sum_checkbox = ttk.Checkbutton(frame_row, text='Sum', variable=self.display_sum, command=self.on_sum_toggle)
+        self.sum_checkbox.pack(side='left')
+        self.update_frame_slider_state()
+
+        # Calculate/FFT row (horizontal)
+        calc_row = ttk.Frame(outer)
+        calc_row.pack(fill='x', pady=2)
+        calc_label = ttk.Label(calc_row, text='Calculate:', anchor='e', width=9)
+        calc_label.pack(side='left')
+        self.display_fft = tk.BooleanVar(value=True)
+        self.norm_checkbox = ttk.Checkbutton(calc_row, text='FFT', variable=self.display_fft)
+        self.norm_checkbox.pack(side='left', padx=(4,0))
+
+        # Show button (full width)
+        self.show_image_btn = ttk.Button(outer, text='Show', command=self.update_image_display)
+        self.show_image_btn.pack(fill='x', pady=(6,0))
+
+        img_params = ttk.LabelFrame(parent, text='Display', padding=(10, 5))
+        # black balance
+        ttk.Label(img_params, text="Black=").grid(row=0, column=0)
+        self.black_level_adjust = ttk.Entry(img_params, textvariable=self.state.black_level) 
+        self.black_level_adjust.grid(row=0, column=1)
+
+        # white balance
+        ttk.Label(img_params, text="White=").grid(row=1, column=0)
+        self.white_level_adjust = ttk.Entry(img_params, textvariable=self.state.white_level) 
+        self.white_level_adjust.grid(row=1, column=1)
+
+        img_params.pack(padx=(6,0))
+
+    def update_frame_slider_state(self):
+        # Disable slider if sum is checked, enable otherwise
         if self.display_sum.get():
-            self.frame_section.grid_remove()
+            self.frame_slider.state(['disabled'])
         else:
-            self.frame_section.grid()
+            self.frame_slider.state(['!disabled'])
 
     def on_sum_toggle(self):
-        self.update_frame_section_visibility()
+        self.update_frame_slider_state()
         # Optionally reset frame index
         if self.display_sum.get():
             self.display_frame_idx.set(0)
@@ -114,26 +157,46 @@ class PeakFinderWidget:
         # Settings group
         settings_frame = ttk.LabelFrame(parent, text='Settings', padding=(5, 5))
         settings_frame.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(0, 10))
-        ttk.Label(settings_frame, text='Ammount').grid(row=0, column=0)
-        self.ammount_slider = ttk.Scale(settings_frame, from_=1, to=2000, orient='horizontal', variable=self.peak_finder_params.ammount)
-        self.ammount_slider.grid(row=0, column=1, sticky='ew')
-        self.ammount_label = ttk.Label(settings_frame, textvariable=self.peak_finder_params.ammount)
-        self.ammount_label.grid(row=0, column=2)
+
+        # Ammount row
+        ammount_row = ttk.Frame(settings_frame)
+        ammount_row.pack(fill='x', pady=2)
+        ttk.Label(ammount_row, text='Ammount:', anchor='e', width=12).pack(side='left')
+        self.ammount_slider = ttk.Scale(ammount_row, from_=1, to=2000, orient='horizontal', variable=self.peak_finder_params.ammount)
+        self.ammount_slider.pack(side='left', fill='x', expand=True)
+        self.ammount_label = ttk.Label(ammount_row, textvariable=self.peak_finder_params.ammount)
+        self.ammount_label.pack(side='left', padx=(4,0))
         self.ammount_slider.config(command=lambda val: self.peak_finder_params.ammount.set(int(float(val))))
-        ttk.Label(settings_frame, text='Cutoff').grid(row=1, column=0)
-        cutoff_entry = ttk.Entry(settings_frame, textvariable=self.peak_finder_params.cutoff)
-        cutoff_entry.grid(row=1, column=1)
-        ttk.Label(settings_frame, text='1.000').grid(row=1, column=2)
-        ttk.Label(settings_frame, text='Mask Radius').grid(row=2, column=0)
-        r_entry = ttk.Entry(settings_frame, textvariable=self.peak_finder_params.R)
-        r_entry.grid(row=2, column=1)
-        ttk.Label(settings_frame, text='Mask Line').grid(row=3, column=0)
-        line_entry = ttk.Entry(settings_frame, textvariable=self.peak_finder_params.LINE)
-        line_entry.grid(row=3, column=1)
-        calc_btn = ttk.Button(settings_frame, text='Calculate', command=self.find_peaks)
-        calc_btn.grid(row=4, column=0, columnspan=2, pady=5)
-        cont_btn = ttk.Button(settings_frame, text='Continue', command=self.continue_fn)
-        cont_btn.grid(row=5, column=0, columnspan=2, pady=5)
+
+        # Cutoff row
+        cutoff_row = ttk.Frame(settings_frame)
+        cutoff_row.pack(fill='x', pady=2)
+        ttk.Label(cutoff_row, text='Cutoff:', anchor='e', width=12).pack(side='left')
+        cutoff_entry = ttk.Entry(cutoff_row, textvariable=self.peak_finder_params.cutoff)
+        cutoff_entry.pack(side='left', fill='x', expand=True)
+
+        # Mask Radius row
+        r_row = ttk.Frame(settings_frame)
+        r_row.pack(fill='x', pady=2)
+        ttk.Label(r_row, text='Mask Radius:', anchor='e', width=12).pack(side='left')
+        r_entry = ttk.Entry(r_row, textvariable=self.peak_finder_params.R)
+        r_entry.pack(side='left', fill='x', expand=True)
+
+        # Mask Line row
+        line_row = ttk.Frame(settings_frame)
+        line_row.pack(fill='x', pady=2)
+        ttk.Label(line_row, text='Mask Line:', anchor='e', width=12).pack(side='left')
+        line_entry = ttk.Entry(line_row, textvariable=self.peak_finder_params.LINE)
+        line_entry.pack(side='left', fill='x', expand=True)
+
+        # Buttons row (horizontal)
+        btn_row = ttk.Frame(settings_frame)
+        btn_row.pack(fill='x', pady=(6,0))
+        self.calc_btn = ttk.Button(btn_row, text='Calculate', command=self.find_peaks)
+        self.calc_btn.pack(side='left', fill='x', expand=True, padx=(0,4))
+        self.cont_btn = ttk.Button(btn_row, text='Continue', command=self.continue_fn)
+        self.cont_btn.pack(side='left', fill='x', expand=True)
+
         # Display group
         display_frame = ttk.LabelFrame(parent, text='Display', padding=(5, 5))
         display_frame.grid(row=1, column=0, columnspan=3, sticky='ew')
@@ -196,7 +259,8 @@ class PeakFinderWidget:
                 self.file_path_var.set(file_path)
                 self.info_display.config(text=f"{width}x{height} @ {frames} Frames")
                 self.display_frame_idx.set(0)
-                self.update_frame_section_visibility()
+                self.frame_slider.config(from_=0, to=max(frames-1, 0))
+                self.update_frame_slider_state()
             self.root.after(0, update_gui)
         if file_path is None:
             file_path = self.file_path_var.get()
@@ -224,27 +288,30 @@ class PeakFinderWidget:
             # Circle mask for R
             circle_mask = CircleMask(center_x, center_y, R)
             # Cross mask for LINE
-            poly_points = [
-                (center_x - LINE//2, center_y), (center_x + LINE//2, center_y),
-                (center_x, center_y - LINE//2), (center_x, center_y + LINE//2)
-            ]
-            poly_mask = PolyMask(poly_points)
-            self.masks = [circle_mask, poly_mask]
+            rectMask1 = RectMask(center_x - LINE//2, 0, LINE, height)
+            rectMask2 = RectMask(0, center_y - LINE//2, width, LINE)
+            self.masks = [circle_mask, rectMask1, rectMask2]
             # Use PeakFinder
             self.peak_finder.clear_masks()
             for mask in self.masks:
                 self.peak_finder.add_mask(mask)
-            self.peak_finder.min_distance = 3  # or expose as UI param
-            self.peak_finder.threshold_rel = cutoff
+            
+            self.peak_finder.threshold_abs = cutoff
             coordinates = self.peak_finder.find_peaks(image=image, window=3)
             if len(coordinates) > ammount:
                 coordinates = coordinates[:ammount]
+            self.peak_finder_cache.coordinates = coordinates
             self.peak_finder.clear_masks()
-            self.root.after(0, lambda: self.update_plot(coordinates))
+            self.root.after(0, self.update_ammount_slider)
+            self.root.after(0, self.reset_peak_finder_buttons)
+            self.root.after(0, self.update_plot)
 
+        self.calc_btn.config(state='disabled')
+        self.calc_btn.config(text='Calculating...')
+        self.cont_btn.config(state='disabled')
         threading.Thread(target=do_find_peaks, daemon=True).start()
 
-    def update_plot(self, coordinates=[]):
+    def update_plot(self):
         show_sum = self.display_sum.get()
         do_fft = self.display_fft.get()
         idx = self.display_frame_idx.get()
@@ -255,6 +322,19 @@ class PeakFinderWidget:
         color = self.display_color.get()
         size = self.display_size.get()
         title = f"{'Sum' if self.display_sum.get() else f'Frame {self.display_frame_idx.get()}'} - {self.state.filename or 'Untitled'}"
+        coordinates = self.peak_finder_cache.coordinates
+        # Build overlay RGBA mask (semi-transparent red) if masks exist
+        overlay = None
+        if self.masks:
+            height, width = image.shape
+            overlay = np.zeros((height, width, 4), dtype=np.float32)
+            for mask in self.masks:
+                mask_arr = mask.as_mask((height, width))
+                overlay[..., 0] += mask_arr.astype(np.float32)  # Red channel
+                overlay[..., 3] += mask_arr.astype(np.float32) * 0.3  # Alpha channel
+            overlay[..., 0] = np.clip(overlay[..., 0], 0, 1)
+            overlay[..., 1:3] = 0  # No green/blue
+            overlay[..., 3] = np.clip(overlay[..., 3], 0, 0.3)  # Max alpha
         self.image_display.display_image(
             image=image,
             mode=mode,
@@ -262,12 +342,39 @@ class PeakFinderWidget:
             size=size,
             title=title,
             coordinates=coordinates,
+            black=self.state.black_level.get(),
+            white=self.state.white_level.get(),
+            overlay=overlay
+        )
+        self.hist_display.display_histogram(
+            image=image,
+            cutoff=self.peak_finder_params.cutoff.get(),
+            title=title,
+            black=self.state.black_level.get(),
+            white=self.state.white_level.get(),
         )
         if len(coordinates) != 0:
             self.ammount_label.config(text=f"{len(coordinates)}")
 
     def update_image_display(self):
-        self.update_plot([])
+        self.update_plot()
+
+    def update_ammount_slider(self):
+        # Update the ammount slider range based on current coordinates
+        if self.peak_finder_cache.coordinates.size > 0:
+            max_ammount = min(2000, len(self.peak_finder_cache.coordinates))
+            self.ammount_slider.config(to=max_ammount)
+            self.peak_finder_params.ammount.set(max_ammount)
+        else:
+            self.ammount_slider.config(to=2000)
+            self.peak_finder_params.ammount.set(600)    
+
+    def reset_peak_finder_buttons(self):
+        # Reset the state of the buttons after calculation
+        self.calc_btn.config(state='normal')
+        self.calc_btn.config(text='Calculate')
+        self.cont_btn.config(state='normal')
+        self.cont_btn.config(text='Continue')
 
     def save_file(): pass
     def save_file_as(self): pass
@@ -282,11 +389,19 @@ class PeakFinderWidget:
 
     def on_closing(self):
         self.image_display.close()
+        self.hist_display.close()
         self.root.destroy()
 
 def run_gui():
     root = tk.Tk()
-    PeakFinderWidget(root)
+    root.resizable(False, False)
+    app = PeakFinderWidget(root)
+    # Check for file path argument
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+        if os.path.isfile(file_path):
+            app.file_path_var.set(file_path)
+            app.on_file_input()
     root.mainloop()
 
 if __name__ == '__main__':
