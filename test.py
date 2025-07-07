@@ -382,10 +382,11 @@ class PeakFinderWidget:
 
     def continue_fn(self): 
         # TODO(Deogratias):
-        #   1. Test what is fast and what is slow here
+        #   1. Test what is fast and what is slow here O(#coordinates * #frames * (w*h)*log(w*h))
         #   2. Implement Threding tor the estractions and ffts
         #   3. Calculate the distance from the center to the center of the peaks (resolution)
         #   4. Have a look at the output format???
+        #   5. seprate this whole file into sensible classes
         # TODO(Johannes):
         #   1. Make this work wit CTF estimation
         #  
@@ -425,9 +426,9 @@ class PeakFinderWidget:
         fft_images = [self.image_handler.fft(frame) for frame in image]
         extraction_size = self.peak_finder_params.R.get()
 
-        results = []
+        results: list[str] = []
         for i, frame in enumerate(fft_images):
-            per_frame_results = []
+            per_frame_results: list[tuple[float, float, float]] = []
             for x, y in self.peak_finder_cache.coordinates:
                 # Extract a square region around the peak
                 half_size = extraction_size // 2
@@ -440,7 +441,7 @@ class PeakFinderWidget:
                 # Fit a Gaussian to the extracted region
                 result = fit_gaussian_2d(extracted_region)
                 per_frame_results.append(result)
-            results.append(f"Frame {i+1}, " + ", ".join(f"{r:.2f}" for r in per_frame_results))
+            results.append(f"Frame {i+1}, " + ", ".join(f"{a:.2f}, {s1:.2f}, {s2:.2f}" for a, s1, s2 in per_frame_results))
 
         # Write results to file
         out_path = os.path.join(os.path.dirname(self.state.filename or 'output.txt'), 'fitted_gaussians.txt')
