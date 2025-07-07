@@ -13,7 +13,7 @@ from typing import Optional, Any
 from display import ImageHandler, ImageDisplay, HistogramDisplay
 from peak_finder import PeakFinder, RectMask, CircleMask
 from loggging import Logging
-
+from timer import Timer
 
 @dataclass
 class State:
@@ -433,9 +433,14 @@ class PeakFinderWidget:
                 return np.nan, np.nan, np.nan
         
         image = self.image_handler.handle
+        timer: Timer = Timer()
+        print("Starting FFT calculation...")
+        timer.start()   
         fft_images = [self.image_handler.fft(frame) for frame in image]
+        elapsed = timer.stop()
+        print(f"FFT calculation took {elapsed:.4f} seconds")
         extraction_size = self.peak_finder_params.R.get()
-
+        return
         results: list[str] = []
         for i, frame in enumerate(fft_images):
             per_frame_results: list[tuple[float, float, float]] = []
