@@ -6,6 +6,10 @@ from typing import List, Optional, Tuple, Sequence
 class Mask:
     def apply(self, arr: np.ndarray) -> np.ndarray:
         raise NotImplementedError
+    def as_mask(self, shape: tuple) -> np.ndarray:
+        # Default: create a dummy array and call apply
+        dummy = np.zeros(shape, dtype=bool)
+        return self.apply(dummy)
 
 class RectMask(Mask):
     def __init__(self, x: int, y: int, width: int, height: int):
@@ -15,6 +19,10 @@ class RectMask(Mask):
         self.height = height
     def apply(self, arr: np.ndarray) -> np.ndarray:
         mask = np.zeros(arr.shape, dtype=bool)
+        mask[self.y:self.y+self.height, self.x:self.x+self.width] = True
+        return mask
+    def as_mask(self, shape: tuple) -> np.ndarray:
+        mask = np.zeros(shape, dtype=bool)
         mask[self.y:self.y+self.height, self.x:self.x+self.width] = True
         return mask
 
@@ -27,6 +35,10 @@ class CircleMask(Mask):
         Y, X = np.ogrid[:arr.shape[0], :arr.shape[1]]
         mask = (X - self.x)**2 + (Y - self.y)**2 <= self.r**2
         return mask
+    def as_mask(self, shape: tuple) -> np.ndarray:
+        Y, X = np.ogrid[:shape[0], :shape[1]]
+        mask = (X - self.x)**2 + (Y - self.y)**2 <= self.r**2
+        return mask
 
 class PolyMask(Mask):
     def __init__(self, vertices: Sequence[Tuple[float, float]]):
@@ -37,11 +49,17 @@ class PolyMask(Mask):
         path = Path(self.vertices)
         mask = path.contains_points(points).reshape(arr.shape)
         return mask
+    def as_mask(self, shape: tuple) -> np.ndarray:
+        Y, X = np.mgrid[:shape[0], :shape[1]]
+        points = np.vstack((X.ravel(), Y.ravel())).T
+        path = Path(self.vertices)
+        mask = path.contains_points(points).reshape(shape)
+        return mask
 
 class PeakFinder:
-    def __init__(self, min_distance: int = 10, threshold_rel: float = 0.5):
+    def __init__(self, min_distance: int = 10, threshold_abs: float = 128):
         self.min_distance: int = min_distance
-        self.threshold_rel: float = threshold_rel
+        self.threshold_abs: float = threshold_abs
         self.masks: List[Mask] = []
 
     def add_mask(self, mask: Mask) -> "PeakFinder":
@@ -61,13 +79,16 @@ class PeakFinder:
             labels: Optional[np.ndarray] = (~mask_total).astype(int)
         else:
             labels = None
+        print(f"PeakFinder: {len(self.masks)} masks applied, labels shape: {labels.shape if labels is not None else 'None'}")
+        print(f"PeakFinder: Finding peaks with min_distance={self.min_distance}, threshold_abs={self.threshold_abs}")
         coordinates = peak_local_max(
             image,
             min_distance=self.min_distance,
-            threshold_rel=self.threshold_rel,
+            threshold_abs=self.threshold_abs,
             exclude_border=False,
             labels=labels
         )
+        print(f"PeakFinder: Found {len(coordinates)} peaks")
         # Sort by average brightness in a window around each peak
         if len(coordinates) > 0:
             pad = window // 2
