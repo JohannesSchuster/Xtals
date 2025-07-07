@@ -381,6 +381,14 @@ class PeakFinderWidget:
     def save_file_as(self): pass
 
     def continue_fn(self): 
+        # TODO(Deogratias):
+        #   1. Test what is fast and what is slow here
+        #   2. Implement Threding tor the estractions and ffts
+        #   3. Calculate the distance from the center to the center of the peaks (resolution)
+        #   4. Have a look at the output format???
+        # TODO(Johannes):
+        #   1. Make this work wit CTF estimation
+        #  
         def fit_gaussian_2d(data: np.ndarray) -> tuple[float, float, float]:
             """
             Fit a 2D Gaussian to the input data array.
