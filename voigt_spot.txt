@@ -1,0 +1,7 @@
+1D Voigt fit parameters:
+Amplitude (absolute intensity): 0.000000
+Center (mean): 22.500000 px
+Sigma (Gaussian width): 1.000000 px
+Gamma (Lorentzian width): 1.000000 px
+Offset (baseline): 0.000000
+Relative intensity (approx.): 0.000000

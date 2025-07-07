@@ -1,0 +1,8 @@
+2D Gaussian fit parameters:
+Amplitude (abs. intensity): 6.498349
+X center: 14.505474 px
+Y center: 13.776985 px
+Sigma X: 0.286591 px
+Sigma Y: 0.670755 px
+Offset (background): 0.196918
+Relative intensity: 3.604023

@@ -1,0 +1,5 @@
+1D Lorentzian fit parameters:
+Amplitude: 1.000000
+Mean (center): 9.000000 px
+Gamma (HWHM): -0.000008 px
+Offset (baseline): -0.000000
