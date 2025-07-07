@@ -7,13 +7,16 @@ import threading
 import numpy as np
 import sys
 from scipy.optimize import curve_fit
+from dataclasses import dataclass, field
+from typing import Optional, Any
+import concurrent.futures
 
+# Importing custom modules
 from display import ImageDisplay
 from display import ImageHandler
 from display import HistogramDisplay
 from peak_finder import PeakFinder, RectMask, CircleMask, PolyMask
-from dataclasses import dataclass, field
-from typing import Optional, Any
+from timer import Timer
 
 @dataclass
 class State:
@@ -34,7 +37,6 @@ class PeakFinderParams:
 class PeakFinderCache:
     coordinates: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
 
-# --- Widget logic ---
 class PeakFinderWidget:
     def __init__(self, root):
         self.root = root
@@ -390,7 +392,18 @@ class PeakFinderWidget:
         # TODO(Johannes):
         #   1. Make this work wit CTF estimation
         #  
-        def fit_gaussian_2d(data: np.ndarray) -> tuple[float, float, float]:
+        class FitResult:
+            def __init__(self, amplitude: float, sigma_x: float, sigma_y: float):
+                self.amplitude = amplitude
+                self.sigma_x = sigma_x
+                self.sigma_y = sigma_y
+
+            def __str__(self):
+                return f"{self.amplitude:.3f}, {self.sigma_x:.3f}, {self.sigma_y:.3f}"
+            
+            def __repr__(self): return self.__str__()
+
+        def fit_gaussian_2d(data: np.ndarray) -> FitResult:
             """
             Fit a 2D Gaussian to the input data array.
             Returns (amplitude, sigma_x, sigma_y)
@@ -418,20 +431,18 @@ class PeakFinderWidget:
             try:
                 popt, _ = curve_fit(gaussian_2d, xdata, ydata, p0=p0, maxfev=10000)
                 amp, x0, y0, sigma_x, sigma_y, offset = popt
-                return amp, sigma_x, sigma_y
+                return FitResult(amp, sigma_x, sigma_y)
             except Exception:
-                return np.nan, np.nan, np.nan
-        
-        image = self.image_handler.handle
-        fft_images = [self.image_handler.fft(frame) for frame in image]
-        extraction_size = self.peak_finder_params.R.get()
-
-        results: list[str] = []
-        for i, frame in enumerate(fft_images):
-            per_frame_results: list[tuple[float, float, float]] = []
+                return FitResult(0.0, 0.0, 0.0)  # Return zeroed result on failure
+            
+        def extraction_worker(frame, idx) -> tuple[int, list[FitResult]]:
+            timer = Timer()
+            timer.start()
+            frame = self.image_handler.fft(frame)
+            results = []
             for x, y in self.peak_finder_cache.coordinates:
                 # Extract a square region around the peak
-                half_size = extraction_size // 2
+                half_size = self.peak_finder_params.R.get() // 2
                 x_start = max(0, int(x) - half_size)
                 x_end = min(frame.shape[1], int(x) + half_size)
                 y_start = max(0, int(y) - half_size)
@@ -440,19 +451,42 @@ class PeakFinderWidget:
 
                 # Fit a Gaussian to the extracted region
                 result = fit_gaussian_2d(extracted_region)
-                per_frame_results.append(result)
-            results.append(f"Frame {i+1}, " + ", ".join(f"{a:.2f}, {s1:.2f}, {s2:.2f}" for a, s1, s2 in per_frame_results))
+                results.append(result)
+            print(f"Extraction for frame {idx} took {timer.stop():.3f} seconds.")
+            return idx, results
 
-        # Write results to file
-        out_path = os.path.join(os.path.dirname(self.state.filename or 'output.txt'), 'fitted_gaussians.txt')
-        try:
-            with open(out_path, 'w', encoding='utf-8') as f:
-                f.write('Frame' + ' '.join([f'Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}' for i in range(len(self.peak_finder_cache.coordinates))]) + '\n')
-                for line in results:
-                    f.write(line + '\n')
-            print(f"Results written to {out_path}")
-        except Exception as e:
-            print(f"Error writing results: {e}")
+        def run_extraction():
+            images = self.image_handler.handle
+            timer = Timer()
+            timer.start()
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(extraction_worker, images, range(len(images))))
+            elapsed = timer.stop()
+            print(f"Extraction, fft and fitting took {elapsed:.3f} seconds.")
+
+            # Write results to file
+            out_path = os.path.join(os.path.dirname(self.state.filename or 'output.txt'), 'fitted_gaussians.txt')
+            try:
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    f.write('Frame, ' + ', '.join([f'Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}' for i in range(len(self.peak_finder_cache.coordinates))]) + '\n')
+                    for line in results:
+                        f.write(', '.join([str(res) for res in line]) + '\n')
+                print(f"Results written to {out_path}")
+            except Exception as e:
+                print(f"Error writing results: {e}")
+            # Schedule GUI update on main thread
+            self.root.after(0, lambda: self._on_continue_done())
+
+        # Disable buttons and give feedback
+        self.cont_btn.config(state='disabled', text='Working...')
+        self.calc_btn.config(state='disabled')
+        threading.Thread(target=run_extraction, daemon=True).start()
+
+    def _on_continue_done(self):
+        self.cont_btn.config(state='normal', text='Continue')
+        self.calc_btn.config(state='normal')
+        #self.info_display.config(text=msg)
 
     def show_about(self):
         tk.messagebox.showinfo(
