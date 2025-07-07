@@ -2,7 +2,7 @@ from numpy import *
 from scipy import optimize
 from scipy import stats
 
-def moments(data,circle,rotate,vheight):
+def moments(data: ndarray, circle, rotate, vheight):
     """Returns (height, amplitude, x, y, width_x, width_y, rotation angle)
     the gaussian parameters of a 2D distribution by calculating its
     moments.  Depending on the input parameters, will only output 
@@ -16,7 +16,7 @@ def moments(data,circle,rotate,vheight):
     row = data[int(x), :]
     width_y = sqrt(abs((arange(row.size)-x)**2*row).sum()/row.sum())
     width = ( width_x + width_y ) / 2.
-    height = stats.mode(data.ravel())[0][0]
+    height = median(data)
     amplitude = data.max()-height
     mylist = [amplitude,x,y]
     if vheight==1:
@@ -120,7 +120,7 @@ def gaussfit(data,err=None,params=[],autoderiv=1,return_all=0,circle=0,rotate=1,
     """
     if params == []:
         params = (moments(data,circle,rotate,vheight))
-    if err == None:
+    if err is None:
         errorfunction = lambda p: ravel((twodgaussian(p,circle,rotate,vheight)(*indices(data.shape)) - data))
     else:
         errorfunction = lambda p: ravel((twodgaussian(p,circle,rotate,vheight)(*indices(data.shape)) - data)/err)

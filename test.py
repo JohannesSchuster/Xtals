@@ -1,3 +1,4 @@
+from scipy import optimize
 import tifffile
 import tkinter as tk
 from tkinter import ttk
@@ -17,6 +18,7 @@ from display import ImageHandler
 from display import HistogramDisplay
 from peak_finder import PeakFinder, RectMask, CircleMask, PolyMask
 from timer import Timer
+from gaussfitter import gaussfit
 
 @dataclass
 class State:
@@ -404,41 +406,22 @@ class PeakFinderWidget:
             def __repr__(self): return self.__str__()
 
         def fit_gaussian_2d(data: np.ndarray) -> FitResult:
-            """
-            Fit a 2D Gaussian to the input data array.
-            Returns (amplitude, sigma_x, sigma_y)
-            """
-            def gaussian_2d(coords, amp, x0, y0, sigma_x, sigma_y, offset):
-                x, y = coords
-                return amp * np.exp(-(((x - x0) ** 2) / (2 * sigma_x ** 2) + ((y - y0) ** 2) / (2 * sigma_y ** 2))) + offset
-    
-            shape = data.shape
-            y = np.arange(shape[0])
-            x = np.arange(shape[1])
-            x, y = np.meshgrid(x, y)
-            xdata = np.vstack((x.ravel(), y.ravel()))
-            ydata = data.ravel()
-    
-            # Initial guess
-            amp_init = np.max(data) - np.min(data)
-            x0_init = shape[1] / 2
-            y0_init = shape[0] / 2
-            sigma_x_init = shape[1] / 4
-            sigma_y_init = shape[0] / 4
-            offset_init = np.min(data)
-            p0 = (amp_init, x0_init, y0_init, sigma_x_init, sigma_y_init, offset_init)
-    
-            try:
-                popt, _ = curve_fit(gaussian_2d, xdata, ydata, p0=p0, maxfev=10000)
-                amp, x0, y0, sigma_x, sigma_y, offset = popt
-                return FitResult(amp, sigma_x, sigma_y)
-            except Exception:
-                return FitResult(0.0, 0.0, 0.0)  # Return zeroed result on failure
+            height, width = data.shape
+            white = data.max()
+            medium = np.median(data)
+            init_params = (medium, white - medium, height / 2, width / 2, 1, 1, 0)  # Offset, Amplitude, center_x, center_y, sigma_x, sigma_y, rotation
+            fit_params = gaussfit(data, params=init_params)
+            if fit_params is None:
+                return FitResult(0, 0, 0)
+            offset, amplitude, x, y, sigma_x, sigma_y, angle = fit_params
+            return FitResult(amplitude, sigma_x, sigma_y)
             
         def extraction_worker(frame, idx) -> tuple[int, list[FitResult]]:
             timer = Timer()
             timer.start()
             frame = self.image_handler.fft(frame)
+            fft_time = timer.stop()
+            timer.start()
             results = []
             for x, y in self.peak_finder_cache.coordinates:
                 # Extract a square region around the peak
@@ -452,7 +435,7 @@ class PeakFinderWidget:
                 # Fit a Gaussian to the extracted region
                 result = fit_gaussian_2d(extracted_region)
                 results.append(result)
-            print(f"Extraction for frame {idx} took {timer.stop():.3f} seconds.")
+            print(f"Frame {idx}: FFT: {fft_time:.3f} s, Fitting: {timer.stop():.3f} s.")
             return idx, results
 
         def run_extraction():
@@ -460,7 +443,7 @@ class PeakFinderWidget:
             timer = Timer()
             timer.start()
             results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 results = list(executor.map(extraction_worker, images, range(len(images))))
             elapsed = timer.stop()
             print(f"Extraction, fft and fitting took {elapsed:.3f} seconds.")
