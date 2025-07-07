@@ -7,13 +7,13 @@ import threading
 import numpy as np
 import sys
 from scipy.optimize import curve_fit
-
-from display import ImageDisplay
-from display import ImageHandler
-from display import HistogramDisplay
-from peak_finder import PeakFinder, RectMask, CircleMask, PolyMask
 from dataclasses import dataclass, field
 from typing import Optional, Any
+
+from display import ImageHandler, ImageDisplay, HistogramDisplay
+from peak_finder import PeakFinder, RectMask, CircleMask
+from loggging import Logging
+
 
 @dataclass
 class State:
@@ -47,6 +47,8 @@ class PeakFinderWidget:
         self.peak_finder_params = PeakFinderParams()
         self.peak_finder_cache = PeakFinderCache()
         self.masks = []  # type: list
+        # Start the logger singleton
+        self.logger = Logging.get(parent=self.root)
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -59,11 +61,19 @@ class PeakFinderWidget:
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.on_closing)
         menubar.add_cascade(label="File", menu=filemenu)
+        # Log menu
+        logmenu = tk.Menu(menubar, tearoff=0)
+        logmenu.add_command(label="Show Log", command=self.show_log_window)
+        menubar.add_cascade(label="Log", menu=logmenu)
+        # About menu
         aboutmenu = tk.Menu(menubar, tearoff=0)
         aboutmenu.add_command(label="About", command=self.show_about)
         menubar.add_cascade(label="About", menu=aboutmenu)
         return menubar
-    
+
+    def show_log_window(self):
+        self.logger.root.deiconify()
+
     def _image_section(self, parent):
         # Use vertical layout for the whole section
         outer = ttk.Frame(parent)

@@ -3,6 +3,8 @@ from skimage.feature import peak_local_max
 from matplotlib.path import Path
 from typing import List, Optional, Tuple, Sequence
 
+from loggging import Logging
+
 class Mask:
     def apply(self, arr: np.ndarray) -> np.ndarray:
         raise NotImplementedError
@@ -79,8 +81,8 @@ class PeakFinder:
             labels: Optional[np.ndarray] = (~mask_total).astype(int)
         else:
             labels = None
-        print(f"PeakFinder: {len(self.masks)} masks applied, labels shape: {labels.shape if labels is not None else 'None'}")
-        print(f"PeakFinder: Finding peaks with min_distance={self.min_distance}, threshold_abs={self.threshold_abs}")
+        Logging.log(f"PeakFinder: {len(self.masks)} masks applied, labels shape: {labels.shape if labels is not None else 'None'}")
+        Logging.log(f"PeakFinder: Finding peaks with min_distance={self.min_distance}, threshold_abs={self.threshold_abs}")
         coordinates = peak_local_max(
             image,
             min_distance=self.min_distance,
@@ -88,7 +90,7 @@ class PeakFinder:
             exclude_border=False,
             labels=labels
         )
-        print(f"PeakFinder: Found {len(coordinates)} peaks")
+        Logging.log(f"PeakFinder: Found {len(coordinates)} peaks")
         # Sort by average brightness in a window around each peak
         if len(coordinates) > 0:
             pad = window // 2
