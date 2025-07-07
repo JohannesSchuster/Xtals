@@ -6,6 +6,7 @@ import os
 import threading
 import numpy as np
 import sys
+from scipy.optimize import curve_fit
 
 from display import ImageDisplay
 from display import ImageHandler
@@ -380,11 +381,69 @@ class PeakFinderWidget:
     def save_file_as(self): pass
 
     def continue_fn(self): 
-        # write out the coordinates to a file or continue processing
-        # extract pixel boxes around the peaks in coordintes
-        # fit a 2D Gaussian to the peaks in each Frame of the FFT image
-        # Take the aplitudes vs. Frame #
-        pass
+        def fit_gaussian_2d(data: np.ndarray) -> tuple[float, float, float]:
+            """
+            Fit a 2D Gaussian to the input data array.
+            Returns (amplitude, sigma_x, sigma_y)
+            """
+            def gaussian_2d(coords, amp, x0, y0, sigma_x, sigma_y, offset):
+                x, y = coords
+                return amp * np.exp(-(((x - x0) ** 2) / (2 * sigma_x ** 2) + ((y - y0) ** 2) / (2 * sigma_y ** 2))) + offset
+    
+            shape = data.shape
+            y = np.arange(shape[0])
+            x = np.arange(shape[1])
+            x, y = np.meshgrid(x, y)
+            xdata = np.vstack((x.ravel(), y.ravel()))
+            ydata = data.ravel()
+    
+            # Initial guess
+            amp_init = np.max(data) - np.min(data)
+            x0_init = shape[1] / 2
+            y0_init = shape[0] / 2
+            sigma_x_init = shape[1] / 4
+            sigma_y_init = shape[0] / 4
+            offset_init = np.min(data)
+            p0 = (amp_init, x0_init, y0_init, sigma_x_init, sigma_y_init, offset_init)
+    
+            try:
+                popt, _ = curve_fit(gaussian_2d, xdata, ydata, p0=p0, maxfev=10000)
+                amp, x0, y0, sigma_x, sigma_y, offset = popt
+                return amp, sigma_x, sigma_y
+            except Exception:
+                return np.nan, np.nan, np.nan
+        
+        image = self.image_handler.handle
+        fft_images = [self.image_handler.fft(frame) for frame in image]
+        extraction_size = self.peak_finder_params.R.get()
+
+        results = []
+        for i, frame in enumerate(fft_images):
+            per_frame_results = []
+            for x, y in self.peak_finder_cache.coordinates:
+                # Extract a square region around the peak
+                half_size = extraction_size // 2
+                x_start = max(0, int(x) - half_size)
+                x_end = min(frame.shape[1], int(x) + half_size)
+                y_start = max(0, int(y) - half_size)
+                y_end = min(frame.shape[0], int(y) + half_size)
+                extracted_region = frame[y_start:y_end, x_start:x_end]
+
+                # Fit a Gaussian to the extracted region
+                result = fit_gaussian_2d(extracted_region)
+                per_frame_results.append(result)
+            results.append(f"Frame {i+1}, " + ", ".join(f"{r:.2f}" for r in per_frame_results))
+
+        # Write results to file
+        out_path = os.path.join(os.path.dirname(self.state.filename or 'output.txt'), 'fitted_gaussians.txt')
+        try:
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write('Frame' + ' '.join([f'Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}' for i in range(len(self.peak_finder_cache.coordinates))]) + '\n')
+                for line in results:
+                    f.write(line + '\n')
+            print(f"Results written to {out_path}")
+        except Exception as e:
+            print(f"Error writing results: {e}")
 
     def show_about(self):
         tk.messagebox.showinfo(
