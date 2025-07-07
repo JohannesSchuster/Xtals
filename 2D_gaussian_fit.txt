@@ -1,0 +1,8 @@
+2D Gaussian fit parameters:
+Amplitude: 1.7899
+X center:  14.5485 px
+Y center:  13.7231 px
+Sigma X:   0.9601 px
+Sigma Y:   0.4264 px
+Theta:     -14008645.4339 rad
+Offset:    0.1970

@@ -1,0 +1,5 @@
+1D Gaussian fit parameters:
+Amplitude: 9.384730
+Mean (center): 9.447027 px
+Sigma (width): 0.240441 px
+Offset (baseline): 0.333333

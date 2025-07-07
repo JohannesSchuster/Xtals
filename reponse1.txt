@@ -1,0 +1,6 @@
+=== Crystal Brightness Analysis ===
+TIFF File: 2025-06-19_21.53.27_Xlzso-NO3-3_r1_77_000.tif
+Brightest Pixel Coordinates: x=1948, y=2331, (max at frame 19)
+
+Gaussian Fit Parameters:
+Amplitude (A): 15.91
