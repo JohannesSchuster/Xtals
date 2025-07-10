@@ -1,6 +1,8 @@
 import torch
 from matplotlib.path import Path
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Sequence
+from timer import timed, Timer
 
 class Mask:
     def apply(self, arr: torch.Tensor) -> torch.Tensor:
@@ -59,10 +61,15 @@ class PolyMask(Mask):
         return torch.from_numpy(mask).to(device)
 
 class PeakFinder:
+    @dataclass
+    class Cache:
+        coordinates: torch.Tensor = field(default_factory=lambda: torch.empty((0, 2), dtype=torch.float32))
+        
     def __init__(self, min_distance: int = 10, threshold_abs: float = 128):
         self.min_distance: int = min_distance
         self.threshold_abs: float = threshold_abs
         self.masks: List[Mask] = []
+        self.cache = PeakFinder.Cache()
 
     def add_mask(self, mask: Mask) -> "PeakFinder":
         self.masks.append(mask)
@@ -72,39 +79,48 @@ class PeakFinder:
         self.masks = []
         return self
 
-    def find_peaks(self, image: torch.Tensor, window: int = 3) -> torch.Tensor:
-        # Combine all masks (logical OR)
+    def find_peaks(self, image: torch.Tensor) -> torch.Tensor:
+        """
+        Fast local maxima detection using max pooling (like skimage.feature.peak_local_max).
+        """
         device = image.device
+        timer: Timer = Timer()
+        timer.start()
+        # 1. Max pooling for local maxima
+        window = 2 * self.min_distance + 1
+        image_max = torch.nn.functional.max_pool2d(
+            image.unsqueeze(0).unsqueeze(0),
+            kernel_size=window,
+            stride=1,
+            padding=self.min_distance
+        )[0, 0]
+        print(f"[PeakFinder] Max pooling: {timer.elapsed*1000:.1f} ms")
+
+        # 2. Find local maxima
+        timer.start()
+        is_peak = (image == image_max) & (image > self.threshold_abs)
+        print(f"[PeakFinder] Find local maxima: {timer.elapsed*1000:.1f} ms")
+
+        # 3. Masking (if any masks are present)
+        timer.start()
         if self.masks:
             mask_total = torch.zeros(image.shape, dtype=torch.bool, device=device)
             for m in self.masks:
                 mask_total |= m.apply(image)
             valid_mask = ~mask_total
-        else:
-            valid_mask = torch.ones(image.shape, dtype=torch.bool, device=device)
-        # Find local maxima using max pooling
-        pad = window // 2
-        image_padded = torch.nn.functional.pad(image, (pad, pad, pad, pad), mode='constant', value=float('-inf'))
-        unfolded = image_padded.unfold(0, window, 1).unfold(1, window, 1)
-        local_max = unfolded.max(dim=-1)[0].max(dim=-1)[0]
-        is_peak = (image == local_max) & (image > self.threshold_abs) & valid_mask
-        # Enforce min_distance by iterative suppression
+            is_peak &= valid_mask
+        print(f"[PeakFinder] Apply masks: {timer.elapsed*1000:.1f} ms")
+
+        # 4. Get coordinates
+        timer.start()
         coords = torch.nonzero(is_peak, as_tuple=False)
-        if coords.shape[0] == 0:
-            return coords
-        # Sort by intensity
-        intensities = image[coords[:,0], coords[:,1]]
-        sorted_idx = torch.argsort(intensities, descending=True)
-        coords = coords[sorted_idx]
-        # Non-maximum suppression for min_distance
-        keep = []
-        taken = torch.zeros(coords.shape[0], dtype=torch.bool, device=device)
-        for i in range(coords.shape[0]):
-            if taken[i]:
-                continue
-            y, x = coords[i].tolist()
-            keep.append([y, x])
-            dist = torch.sqrt((coords[:,0] - y)**2 + (coords[:,1] - x)**2)
-            taken |= dist < self.min_distance
-        coords_out = torch.tensor(keep, dtype=torch.int64, device=device)
-        return coords_out
+        print(f"[PeakFinder] Get coordinates: {timer.elapsed*1000:.1f} ms")
+
+        # 5. Optionally sort by intensity (descending)
+        timer.start()
+        if coords.shape[0] > 0:
+            intensities = image[coords[:,0], coords[:,1]]
+            sorted_idx = torch.argsort(intensities, descending=True)
+            coords = coords[sorted_idx]
+        print(f"[PeakFinder] Sort coordinates: {timer.elapsed*1000:.1f} ms")
+        self.cache.coordinates = coords

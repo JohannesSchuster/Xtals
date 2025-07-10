@@ -16,28 +16,25 @@ import torch
 from display import Image, ImageDisplay, ImageHandler, FFImageHandler
 from display import HistogramDisplay
 from peak_finder import PeakFinder, Mask, RectMask, CircleMask, PolyMask
-from timer import Timer
+from timer import Timer, timed
 from gaussfitter import gaussfit
+
+
 
 @dataclass
 class State:
-    handle: Optional[torch.Tensor] = None
     filename: Optional[str] = None
-    black_level: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=0.25))
-    white_level: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=0.9))
-    sigma_var: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=3.0))
-    gamma_var: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=6.0))
+    black_level: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=0.0))
+    white_level: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=1.0))
+    sigma_var: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=1.0))
+    gamma_var: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=1.0))
 
 @dataclass
 class PeakFinderParams:
     ammount: tk.IntVar = field(default_factory=lambda: tk.IntVar(value=50))
-    cutoff: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=220))
+    cutoff: tk.DoubleVar = field(default_factory=lambda: tk.DoubleVar(value=0.95))
     R: tk.IntVar = field(default_factory=lambda: tk.IntVar(value=150))
     LINE: tk.IntVar = field(default_factory=lambda: tk.IntVar(value=20))
-
-@dataclass
-class PeakFinderCache:
-    coordinates: torch.Tensor = field(default_factory=lambda: torch.empty((0, 2), dtype=torch.float32))
 
 class PeakFinderWidget:
     def __init__(self, root):
@@ -50,8 +47,6 @@ class PeakFinderWidget:
         self.hist_display = HistogramDisplay()
         self.peak_finder = PeakFinder()
         self.peak_finder_params = PeakFinderParams()
-        self.peak_finder_cache = PeakFinderCache()
-        self.masks: list[Mask] = []  # type: list
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -66,8 +61,10 @@ class PeakFinderWidget:
         menubar.add_cascade(label="File", menu=filemenu)
         # Image menu
         imagemenu = tk.Menu(menubar, tearoff=0)
-        imagemenu.add_command(label="Precalculate Sum", command=self.on_precalc_sum)
-        imagemenu.add_command(label="Precalculate FFT", command=self.on_precalc_ffts)
+        self.precalc_sum_var = tk.BooleanVar(value=False)
+        self.precalc_fft_var = tk.BooleanVar(value=False)
+        imagemenu.add_checkbutton(label="Precalculate Sum", variable=self.precalc_sum_var, command=self.on_precalc_sum)
+        imagemenu.add_checkbutton(label="Precalculate FFT", variable=self.precalc_fft_var, command=self.on_precalc_ffts)
         menubar.add_cascade(label="Image", menu=imagemenu)
         aboutmenu = tk.Menu(menubar, tearoff=0)
         aboutmenu.add_command(label="About", command=self.show_about)
@@ -135,10 +132,6 @@ class PeakFinderWidget:
         self.norm_checkbox = ttk.Checkbutton(calc_row, text='FFT', variable=self.display_fft)
         self.norm_checkbox.pack(side='left', padx=(4,0))
 
-        # Show button (full width)
-        self.show_image_btn = ttk.Button(outer, text='Show', command=self.update_image_display)
-        self.show_image_btn.pack(fill='x', pady=(6,0))
-
         # Image display frame
         img_frame = ttk.LabelFrame(parent, text='Display', padding=(5, 5))
         img_frame.pack(fill='x', pady=(10, 0))
@@ -173,8 +166,8 @@ class PeakFinderWidget:
         y_axis_menu = ttk.OptionMenu(hist_frame, self.hist_y_axis, 'linear', 'linear', 'log')
         y_axis_menu.grid(row=1, column=1, sticky='w')
         # Update histogram on change
-        self.hist_x_axis.trace_add('write', lambda *args: self.update_plot())
-        self.hist_y_axis.trace_add('write', lambda *args: self.update_plot())
+        self.hist_x_axis.trace_add('write', lambda *args: self.refresh_histogram())
+        self.hist_y_axis.trace_add('write', lambda *args: self.refresh_histogram())
 
     def update_frame_slider_state(self):
         # Disable slider if sum is checked, enable otherwise
@@ -211,19 +204,8 @@ class PeakFinderWidget:
         max_entry = ttk.Entry(ammount_row, textvariable=self.ammount_slider_max, width=4)
         max_entry.pack(side='left', padx=(4, 0))
         # Update slider max only on defocus or Enter
-        def update_slider_max(event=None):
-            try:
-                new_max = int(self.ammount_slider_max.get())
-                new_max = torch.clamp(new_max, 1, 999)  # Clamp to a reasonable range
-                self.ammount_slider.config(to=new_max)
-                self.ammount_slider_max.set(new_max)  # Update the entry value
-                # Clamp slider value if needed
-                if self.peak_finder_params.ammount.get() > new_max:
-                    self.peak_finder_params.ammount.set(new_max)
-            except Exception:
-                pass
-        max_entry.bind('<FocusOut>', update_slider_max)
-        max_entry.bind('<Return>', update_slider_max)
+        max_entry.bind('<FocusOut>', self.update_slider_max)
+        max_entry.bind('<Return>', self.update_slider_max)
         # Update label when slider changes
         self.ammount_slider.config(command=lambda val: self.peak_finder_params.ammount.set(int(float(val))))
 
@@ -317,7 +299,6 @@ class PeakFinderWidget:
 
         def do_load(file_path):
             handle = torch.from_numpy(tifffile.imread(file_path))
-            self.state.handle = handle
             self.state.filename = os.path.basename(file_path)
             self.image_handler.set_handle(handle)
             height, width = handle.shape[-2], handle.shape[-1]
@@ -329,6 +310,7 @@ class PeakFinderWidget:
                 self.frame_slider.config(from_=0, to=max(frames-1, 0))
                 self.update_frame_slider_state()
             self.root.after(0, update_gui)
+            
         if file_path is None:
             file_path = self.file_path_var.get()
             if not file_path or not os.path.isfile(file_path):
@@ -337,6 +319,7 @@ class PeakFinderWidget:
         threading.Thread(target=do_load, args=(file_path,), daemon=True).start()
 
     def find_peaks(self):
+        @timed
         def do_find_peaks():
             image = self.get_image()
             if image is not None:
@@ -354,21 +337,15 @@ class PeakFinderWidget:
                 # Cross mask for LINE
                 rectMask1 = RectMask(center_x - LINE//2, 0, LINE, height)
                 rectMask2 = RectMask(0, center_y - LINE//2, width, LINE)
-                self.masks = [circle_mask, rectMask1, rectMask2]
                 # Use PeakFinder
                 self.peak_finder.clear_masks()
-                for mask in self.masks:
-                    self.peak_finder.add_mask(mask)
-
+                self.peak_finder.add_mask(circle_mask)
+                self.peak_finder.add_mask(rectMask1)
+                self.peak_finder.add_mask(rectMask2)
                 self.peak_finder.threshold_abs = cutoff
-                coordinates = self.peak_finder.find_peaks(image=image, window=3)
-                if len(coordinates) > ammount:
-                    coordinates = coordinates[:ammount]
-                self.peak_finder_cache.coordinates = coordinates
-                self.peak_finder.clear_masks()
-                self.root.after(0, self.update_plot)
+                self.peak_finder.find_peaks(image=image.torch())
+                self.root.after(0, self.refresh_display)
 
-            self.root.after(0, self.update_ammount_slider)
             self.root.after(0, self.reset_peak_finder_buttons)
 
         self.calc_btn.config(state='disabled')
@@ -382,86 +359,104 @@ class PeakFinderWidget:
         show_sum = self.display_sum.get()
         do_fft = self.display_fft.get()
         idx = self.display_frame_idx.get()
+        img = None
         if do_fft and self.fft_image_cache is None:
             self.fft_image_cache = FFImageHandler()
             self.fft_image_cache.set_handle(self.image_handler.handle)
         if do_fft:
-            if show_sum: return self.fft_image_cache.get_sum()
-            else: return self.fft_image_cache.get_frame(idx)
+            if show_sum: img = self.fft_image_cache.get_sum()
+            else: img = self.fft_image_cache.get_frame(idx)
         else:
-            if show_sum: return self.image_handler.get_sum()
-            else: return self.image_handler.get_frame(idx)
+            if show_sum: img = self.image_handler.get_sum()
+            else: img = self.image_handler.get_frame(idx)
+        return img
 
-    def update_plot(self):
-        image = self.get_image()
-        if image is None:
-            return
-        mode = self.display_mode.get()
-        color = self.display_color.get()
-        size = self.display_size.get()
-        title = f"{'Sum' if self.display_sum.get() else f'Frame {self.display_frame_idx.get()}'} - {self.state.filename or 'Untitled'}"
-        
-        # Only show coordinates if checkbox is checked
-        coordinates = None
-        if self.show_coordinates.get() and self.peak_finder_cache.coordinates.numel() > 0:
-            # Limit the number of coordinates to the selected amount    
-            coordinates = self.peak_finder_cache.coordinates[0: self.peak_finder_params.ammount.get()]
-
-        # Only show overlay if checkbox is checked
-        overlay = None
-        if self.show_masks.get() and self.masks:
-            height, width = image.shape
-            overlay = torch.zeros((height, width, 4), dtype=torch.float32, device=image.device)
-            for mask in self.masks:
-                mask_arr = mask.as_mask((height, width), device=image.device)
-                overlay[..., 0] += mask_arr  # Red channel
-                overlay[..., 3] += mask_arr * 0.3  # Alpha channel
-            overlay[..., 0] = torch.clamp(overlay[..., 0], 0, 1)
-            overlay[..., 1:3] = 0  # No green/blue
-            overlay[..., 3] = torch.clamp(overlay[..., 3], 0, 0.3)  # Max alpha
+    def apply_image_transformations(self, image: Image) -> Image:
         # Get sigma and gamma
         sigma = self.state.sigma_var.get() 
         gamma = self.state.gamma_var.get() 
-        black = max(0.0, min(1.0, self.state.black_level.get()))
-        white = max(0.0, min(1.0, self.state.white_level.get()))
+        black = self.state.black_level.get()
+        white = self.state.white_level.get()
+        
+        # Apply transformations
         image = image.rescale(sigma=sigma, gamma=gamma)
         image = image.remap(min_val=black, max_val=white)
-        self.image_display.display_image(
-            image=image,
-            mode=mode,
-            color=color,
-            size=size,
-            title=title,
-            coordinates=coordinates,
-            overlay=overlay
-        )
-        self.hist_display.display_histogram(
-            image=image,
-            cutoff=self.peak_finder_params.cutoff.get(),
-            title=title,
-            black=black,
-            white=white,
-            xscale=self.hist_x_axis.get(),
-            yscale=self.hist_y_axis.get(),
-        )
+        return image
+    
+    def get_title(self) -> str:
+        if self.display_sum.get():
+            return f"Sum - {self.state.filename or 'Untitled'}"
+        else:
+            return f"Frame {self.display_frame_idx.get()} - {self.state.filename or 'Untitled'}"
+
+    def refresh_display(self, image: Optional[Image] = None, title: Optional[str] = None):
+        def do_refresh_display(image: Image, title: str):
+            if image is None:
+                try: image = self.apply_image_transformations(self.get_image())
+                except: return
+
+            if title is None:
+                title = self.get_title()
+
+            mode = self.display_mode.get()
+            color = self.display_color.get()
+            size = self.display_size.get()
+
+            # Only show coordinates if checkbox is checked
+            coordinates = None
+            if self.show_coordinates.get() and self.peak_finder.cache.coordinates.numel() > 0:
+                # Limit the number of coordinates to the selected amount    
+                coordinates = self.peak_finder.cache.coordinates[0: self.peak_finder_params.ammount.get()]
+
+            # Only show overlay if checkbox is checked
+            overlay = None
+            if self.show_masks.get() and self.peak_finder.masks:
+                height, width = image.shape
+                overlay = torch.zeros((height, width, 4), dtype=torch.float32, device=image.device)
+                for mask in self.peak_finder.masks:
+                    mask_arr = mask.as_mask((height, width), device=image.device)
+                    overlay[..., 0] += mask_arr  # Red channel
+                    overlay[..., 3] += mask_arr * 0.3  # Alpha channel
+                overlay[..., 0] = torch.clamp(overlay[..., 0], 0, 1)
+                overlay[..., 1:3] = 0  # No green/blue
+                overlay[..., 3] = torch.clamp(overlay[..., 3], 0, 0.3)  # Max alpha
+            self.root.after(0, self.image_display.display, image, coordinates, overlay, mode, color, size, title)
+        
+        threading.Thread(target=do_refresh_display, args=(image, title), daemon=True).start()
+
+    def refresh_histogram(self, image: Optional[Image] = None, title: Optional[str] = None):
+        def do_refresh_histogram(image: Image, title: str):
+            if image is None:
+                image = self.apply_image_transformations(self.get_image())
+
+            if title is None:
+                title = self.get_title()
+
+            cutoff=self.peak_finder_params.cutoff.get()
+            black=self.state.black_level.get()
+            white=self.state.white_level.get()
+            xscale=self.hist_x_axis.get()
+            yscale=self.hist_y_axis.get()
+            self.root.after(0, self.hist_display.display, image, cutoff, title, black, white, xscale, yscale)
+       
+        threading.Thread(target=do_refresh_histogram, args=(image, title), daemon=True).start()
 
     def update_image_display(self):
-        self.update_plot()
+        def do_update_image_display():
+            image = self.apply_image_transformations(self.get_image())
+            title = self.get_title()
+            self.root.after(0, self.refresh_display, image, title)
+            self.root.after(0, self.refresh_histogram, image, title)
+        threading.Thread(target=do_update_image_display, daemon=True).start()
 
-    def update_ammount_slider(self):
-        # Update the ammount slider range based on current coordinates
-        coords = self.peak_finder_cache.coordinates
-        found = coords.size(dim=0)
-        if found > 0:
-            max_ammount = min(2000, found)
-            self.ammount_slider.config(to=max_ammount)
-            # Set slider to selected (if not already)
-            selected = self.peak_finder_params.ammount.get()
-            if selected > max_ammount or selected == 0:
-                self.peak_finder_params.ammount.set(max_ammount)
-        else:
-            self.ammount_slider.config(to=2000)
-            self.peak_finder_params.ammount.set(600)    
+    def update_slider_max(self, event=None):
+        new_max = int(self.ammount_slider_max.get())
+        new_max = min(max(new_max, 1), 999)  # Clamp to a reasonable range
+        self.ammount_slider.config(to=new_max)
+        self.ammount_slider_max.set(new_max)  # Update the entry value
+        # Clamp slider value if needed
+        if self.peak_finder_params.ammount.get() > new_max:
+            self.peak_finder_params.ammount.set(new_max)
 
     def reset_peak_finder_buttons(self):
         # Reset the state of the buttons after calculation
@@ -528,7 +523,7 @@ class PeakFinderWidget:
             fft_time = timer.stop()
             timer.start()
             results = []
-            for x, y in self.peak_finder_cache.coordinates:
+            for x, y in self.peak_finder.cache.coordinates:
                 half_size = self.peak_finder_params.R.get() // 2
                 x_start = max(0, int(x) - half_size)
                 x_end = min(frame_fft.shape[1], int(x) + half_size)
@@ -554,7 +549,7 @@ class PeakFinderWidget:
             out_path = os.path.join(os.path.dirname(self.state.filename or 'output.txt'), 'fitted_gaussians.txt')
             try:
                 with open(out_path, 'w', encoding='utf-8') as f:
-                    f.write('Frame, ' + ', '.join([f'Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}' for i in range(len(self.peak_finder_cache.coordinates))]) + '\n')
+                    f.write('Frame, ' + ', '.join([f'Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}' for i in range(len(self.peak_finder.cache.coordinates))]) + '\n')
                     for line in results:
                         f.write(', '.join([f'{res}' for res in line]) + '\n')
                 print(f"Results written to {out_path}")
@@ -587,16 +582,17 @@ class PeakFinderWidget:
     def on_precalc_sum(self):
         if self.image_handler.handle is None:
             return
-        self.image_handler.precompute()
-        self.info_display.config(text="Sum precalculated.")
+        if self.precalc_sum_var.get():
+            threading.Thread(target=self.image_handler.precompute, daemon=True).start()
 
     def on_precalc_ffts(self):
         if self.image_handler.handle is None:
             return
-        self.fft_image_cache = FFImageHandler()
-        self.fft_image_cache.set_handle(self.image_handler.handle)
-        self.fft_image_cache.precompute()
-        self.info_display.config(text="FFT precalculated.")
+        if self.precalc_fft_var.get():
+            if self.fft_image_cache is None:
+                self.fft_image_cache = FFImageHandler()
+                self.fft_image_cache.set_handle(self.image_handler.handle)
+            threading.Thread(target=self.fft_image_cache.precompute, daemon=True).start()
 
 
 def run_gui():

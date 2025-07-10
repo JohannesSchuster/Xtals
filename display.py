@@ -15,6 +15,9 @@ class Image:
     def numpy(self):
         return self.cpu().numpy()
 
+    def torch(self):
+        return self._tensor
+
     @property
     def shape(self):
         return self._tensor.shape
@@ -99,15 +102,17 @@ class ImageHandler:
             self.sum = Image(torch.sum(self.handle, dim=0))
         else:
             self.sum = None
-        self.last_result = None
-        self.last_settings = None
 
     def get_sum(self) -> Optional[Image]:
+        if self.handle is None:
+            return None
         if self.sum is None:
             self.precompute()
         return self.sum
 
     def get_frame(self, frame_idx: int) -> Optional[Image]:
+        if self.handle is None:
+            return None
         idx = self._get_valid_frame_idx(frame_idx)
         return Image(self.handle[idx])
     
@@ -119,17 +124,27 @@ class ImageHandler:
 class FFImageHandler(ImageHandler):
     def __init__(self):
         super().__init__()
-        self.frames: Optional[list[Image]] = None
+        self.frames: dict[int, Optional[Image]] = {}
     
     def precompute(self):
         # Multi-frame: compute FFT for each frame
-        self.frames = [Image(self.fft(frame)) for frame in self.handle]
-        self.sum = Image(self.fft(torch.sum(self.handle, dim=0)))
+        for idx in range(self.handle.shape[0]):
+            self.get_frame(idx)
+        self.get_sum()
 
-    def get_frame(self, frame_idx):
+    def get_sum(self) -> Optional[Image]:
+        if self.handle is None:
+            return None
+        if self.sum is None:
+            self.sum = Image(self.fft(torch.sum(self.handle, dim=0)))
+        return self.sum
+
+    def get_frame(self, frame_idx) -> Optional[Image]:
+        if self.handle is None:
+            return None
         idx = self._get_valid_frame_idx(frame_idx)
-        if self.frames is None:
-            self.precompute()
+        if self.frames.get(idx) is None:
+            self.frames[idx] = Image(self.fft(self.handle[idx]))
         return self.frames[idx]
 
     @staticmethod
@@ -159,18 +174,19 @@ class ImageDisplay(BaseDisplay):
         self.img_obj: Optional[plt.AxesImage] = None
         self.overlay: Optional[plt.AxesImage] = None
 
-    def display_image(self, 
-                      image: Image, 
-                      coordinates: torch.Tensor | None = None, 
-                      overlay: Image | None = None,
-                      mode: str = 'Circle', color: str = 'red', size: int=10, 
-                      title: str = ''):    
+    def display(self, 
+                image: Image, 
+                coordinates: torch.Tensor | None = None, 
+                overlay: Image | None = None,
+                mode: str = 'Circle', color: str = 'red', size: int=10, 
+                title: str = ''):    
         # If the window was closed, reset all figure/axes/img_obj
         if self.fig is not None and (not plt.fignum_exists(self.fig.number)):
             self.fig = None
             self.ax = None
             self.img_obj = None
             self.overlay = None
+
         if self.fig is None or self.ax is None or self.img_obj is None:
             self.fig, self.ax = plt.subplots(figsize=(7, 7))
             self.img_obj = self.ax.imshow(image.numpy(), cmap='gray')
@@ -190,7 +206,7 @@ class ImageDisplay(BaseDisplay):
             self.fig.canvas.draw_idle()
         # Draw overlay as RGBA image if provided
         if overlay is not None:
-            self.overlay = self.ax.imshow(overlay.numpy(), interpolation='none')
+            self.overlay = self.ax.imshow(overlay.cpu().numpy(), interpolation='none')
         if coordinates is not None:
             coordinates = coordinates.cpu().numpy()
             for y, x in coordinates:
@@ -210,7 +226,7 @@ class HistogramDisplay(BaseDisplay):
         self.bar_container = None
         self.cutoff_line = None
 
-    def display_histogram(self, image: Image, cutoff: float, title: str = "", black: float = 0, white: float = 1, xscale: str = 'linear', yscale: str = 'linear'):
+    def display(self, image: Image, cutoff: float, title: str = "", black: float = 0, white: float = 1, xscale: str = 'linear', yscale: str = 'linear'):
         # Use torch for histogram computation, convert to numpy for plotting
         bins = int((white - black) * 256)
         if bins < 1:
