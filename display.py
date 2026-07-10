@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import torch
-from typing import Optional
+from typing import Callable, Optional
 
 class Image:
     def __init__(self, tensor: torch.Tensor):
@@ -121,7 +121,7 @@ class ImageHandler:
             return 0
         return frame_idx
 
-class FFImageHandler(ImageHandler):
+class FFTImageHandler(ImageHandler):
     def __init__(self):
         super().__init__()
         self.frames: dict[int, Optional[Image]] = {}
@@ -164,9 +164,32 @@ class BaseDisplay:
 
     def close(self) -> None:
         if self.fig is not None:
-            plt.close(self.fig)
-            self.fig = None
-            self.ax = None
+            try:
+                # Try to close the figure properly
+                plt.close(self.fig)
+            except Exception as e:
+                # If there's an error closing, try to force close
+                print(f"Warning: Error closing figure: {e}")
+                try:
+                    # Force close by removing from pyplot's figure manager
+                    if hasattr(plt, '_pylab_helpers') and hasattr(plt._pylab_helpers, 'Gcf'):
+                        for fig_manager in list(plt._pylab_helpers.Gcf.figs.values()):
+                            if fig_manager.canvas.figure == self.fig:
+                                plt._pylab_helpers.Gcf.destroy(fig_manager.num)
+                                break
+                except Exception:
+                    pass  # Ignore secondary errors
+            finally:
+                self.fig = None
+                self.ax = None
+
+    def callback(self, event: str, func: Callable[[], None]):
+        if self.fig is not None and hasattr(self.fig.canvas, 'manager'):
+            try:
+                if hasattr(self.fig.canvas.manager, 'window'):
+                    self.fig.canvas.manager.window.protocol(event, func)
+            except Exception as e:
+                print(f"Warning: Error setting window callback: {e}")
 
 class ImageDisplay(BaseDisplay):
     def __init__(self) -> None:
@@ -232,6 +255,8 @@ class HistogramDisplay(BaseDisplay):
         if bins < 1:
             bins = 1
         # Compute histogram with torch
+        if type(image) != Image:
+            print(image)
         hist, bin_edges = torch.histogram(image.cpu().flatten(), bins=bins, range=(black, white))
         hist = hist.float()
         if hist.sum() > 0:

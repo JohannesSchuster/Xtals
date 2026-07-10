@@ -8,12 +8,12 @@ import threading
 import numpy as np
 import sys
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Callable, Optional, Any
 import concurrent.futures
 import torch
 
 # Importing custom modules
-from display import Image, ImageDisplay, ImageHandler, FFImageHandler
+from display import Image, ImageDisplay, ImageHandler, FFTImageHandler
 from display import HistogramDisplay
 from peak_finder import PeakFinder, Mask, RectMask, CircleMask, PolyMask
 from timer import Timer, timed
@@ -47,11 +47,15 @@ class PeakFinderWidget:
         self.hist_display = HistogramDisplay()
         self.peak_finder = PeakFinder()
         self.peak_finder_params = PeakFinderParams()
+        self._current_file_path = None  # Track currently loaded file
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.image_display.callback("WM_DELETE_WINDOW", self.on_closing_display)
+        self.hist_display.callback("WM_DELETE_WINDOW", self.on_closing_hist)
 
     def _menubar(self):
         menubar = tk.Menu(self.root)
+        # File menu
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Load", command=self.browse_file)
         filemenu.add_command(label="Save", command=self.save_file)
@@ -59,6 +63,7 @@ class PeakFinderWidget:
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.on_closing)
         menubar.add_cascade(label="File", menu=filemenu)
+
         # Image menu
         imagemenu = tk.Menu(menubar, tearoff=0)
         self.precalc_sum_var = tk.BooleanVar(value=False)
@@ -66,11 +71,13 @@ class PeakFinderWidget:
         imagemenu.add_checkbutton(label="Precalculate Sum", variable=self.precalc_sum_var, command=self.on_precalc_sum)
         imagemenu.add_checkbutton(label="Precalculate FFT", variable=self.precalc_fft_var, command=self.on_precalc_ffts)
         menubar.add_cascade(label="Image", menu=imagemenu)
+
+        # About menu
         aboutmenu = tk.Menu(menubar, tearoff=0)
         aboutmenu.add_command(label="About", command=self.show_about)
         menubar.add_cascade(label="About", menu=aboutmenu)
         return menubar
-    
+
     def _image_section(self, parent):
         # Use vertical layout for the whole section
         outer = ttk.Frame(parent)
@@ -84,8 +91,8 @@ class PeakFinderWidget:
         self.file_path_var = tk.StringVar()
         self.file_input = ttk.Entry(file_row, textvariable=self.file_path_var, width=40)
         self.file_input.pack(side='left', fill='x', expand=True, padx=(0, 2))
-        self.file_input.bind('<Return>', self.load_file)
-        self.file_input.bind('<FocusOut>', self.load_file)
+        self.file_input.bind('<Return>', lambda e: self.load_file())
+        self.file_input.bind('<FocusOut>', lambda e: self.load_file())
         self.browse_btn = ttk.Button(file_row, text='Browse', command=self.browse_file)
         self.browse_btn.pack(side='left')
 
@@ -133,41 +140,80 @@ class PeakFinderWidget:
         self.norm_checkbox.pack(side='left', padx=(4,0))
 
         # Image display frame
-        img_frame = ttk.LabelFrame(parent, text='Display', padding=(5, 5))
-        img_frame.pack(fill='x', pady=(10, 0))
+        self.display_img_frame = ttk.LabelFrame(parent, text='Display')
+        self.display_img_frame.pack(fill='x', pady=(10, 0))
+        self.display_img_frame.grid_columnconfigure(2, weight=1)
         # black level
-        ttk.Label(img_frame, text="Black [0-1]=").grid(row=0, column=0)
-        self.black_level_entry = ttk.Entry(img_frame, textvariable=self.state.black_level) 
-        self.black_level_entry.grid(row=0, column=1)
+        ttk.Label(self.display_img_frame, text="Black [0-1] =").grid(row=0, column=0, sticky='e')
+        self.black_level_entry = ttk.Entry(self.display_img_frame, textvariable=self.state.black_level, width=10) 
+        self.black_level_entry.grid(row=0, column=1, sticky='e')
         # white level
-        ttk.Label(img_frame, text="White [0-1]=").grid(row=1, column=0)
-        self.white_level_entry = ttk.Entry(img_frame, textvariable=self.state.white_level) 
-        self.white_level_entry.grid(row=1, column=1)
+        ttk.Label(self.display_img_frame, text="White [0-1] =").grid(row=1, column=0, sticky='e')
+        self.white_level_entry = ttk.Entry(self.display_img_frame, textvariable=self.state.white_level, width=10) 
+        self.white_level_entry.grid(row=1, column=1, sticky='e')
         # sigma
-        ttk.Label(img_frame, text="Sigma=").grid(row=0, column=2)
-        self.sigma_entry = ttk.Entry(img_frame, textvariable=self.state.sigma_var, width=6)
-        self.sigma_entry.grid(row=0, column=3)
+        ttk.Label(self.display_img_frame, text="Sigma =").grid(row=0, column=2, sticky='e')
+        self.sigma_entry = ttk.Entry(self.display_img_frame, textvariable=self.state.sigma_var, width=10)
+        self.sigma_entry.grid(row=0, column=3, sticky='e')
         # gamma
-        ttk.Label(img_frame, text="Gamma=").grid(row=1, column=2)
-        self.gamma_entry = ttk.Entry(img_frame, textvariable=self.state.gamma_var, width=6)
-        self.gamma_entry.grid(row=1, column=3)
+        ttk.Label(self.display_img_frame, text="Gamma =").grid(row=1, column=2, sticky='e')
+        self.gamma_entry = ttk.Entry(self.display_img_frame, textvariable=self.state.gamma_var, width=10)
+        self.gamma_entry.grid(row=1, column=3, sticky='e')
+        # Refresh button
+        self.show_image_display = False
+        def display_button_command():
+            if self.show_image_display:
+                self.display_refresh_button.config(text='Refresh...')
+            else:
+                self.display_refresh_button.config(text='Show...')
+            self.show_image_display = True
+            self.refresh_display()
+        self.display_refresh_button = ttk.Button(self.display_img_frame, text='Show', command=display_button_command)
+        self.display_refresh_button.grid(row=2, column=1, columnspan=2, sticky='e', pady=(4, 0))
+        self.auto_refresh_image_display = tk.BooleanVar(value=True)
+        self.auto_refresh_image_checkbox = ttk.Checkbutton(self.display_img_frame, text='Auto Refresh', variable=self.auto_refresh_image_display)
+        self.auto_refresh_image_checkbox.grid(row=2, column=3, sticky='w', pady=(4, 0))
 
         # Histogram display frame
-        hist_frame = ttk.LabelFrame(parent, text='Histogram', padding=(5, 5))
-        hist_frame.pack(fill='x', pady=(10, 0))
+        self.display_hist_frame = ttk.LabelFrame(parent, text='Histogram')
+        self.display_hist_frame.pack(fill='x', pady=(10, 0))
+        self.display_hist_frame.grid_columnconfigure(2, weight=1)
         # X Axis selection
-        ttk.Label(hist_frame, text='X Axis:').grid(row=0, column=0, sticky='w')
+        ttk.Label(self.display_hist_frame, text='X Axis:').grid(row=0, column=0, sticky='w')
         self.hist_x_axis = tk.StringVar(value='linear')
-        x_axis_menu = ttk.OptionMenu(hist_frame, self.hist_x_axis, 'linear', 'linear', 'log')
+        x_axis_menu = ttk.OptionMenu(self.display_hist_frame, self.hist_x_axis, 'linear', 'linear', 'log')
         x_axis_menu.grid(row=0, column=1, sticky='w')
         # Y Axis selection
-        ttk.Label(hist_frame, text='Y Axis:').grid(row=1, column=0, sticky='w')
+        ttk.Label(self.display_hist_frame, text='Y Axis:').grid(row=1, column=0, sticky='w')
         self.hist_y_axis = tk.StringVar(value='linear')
-        y_axis_menu = ttk.OptionMenu(hist_frame, self.hist_y_axis, 'linear', 'linear', 'log')
+        y_axis_menu = ttk.OptionMenu(self.display_hist_frame, self.hist_y_axis, 'linear', 'linear', 'log')
         y_axis_menu.grid(row=1, column=1, sticky='w')
         # Update histogram on change
-        self.hist_x_axis.trace_add('write', lambda *args: self.refresh_histogram())
-        self.hist_y_axis.trace_add('write', lambda *args: self.refresh_histogram())
+        self.hist_x_axis.trace_add('write', self.auto_update_histogram_display)
+        self.hist_y_axis.trace_add('write', self.auto_update_histogram_display)
+
+        # Refresh button
+        self.show_hist_display = False
+        def hist_button_command():
+            if self.show_hist_display:
+                self.hist_refresh_button.config(text='Refresh...')
+            else:
+                self.hist_refresh_button.config(text='Show...')
+            self.show_hist_display = True
+            self.refresh_histogram()
+        self.hist_refresh_button = ttk.Button(self.display_hist_frame, text='Show', command=hist_button_command)
+        self.hist_refresh_button.grid(row=2, column=1, columnspan=2, sticky='e', pady=(4, 0))
+        self.auto_refresh_hist_display = tk.BooleanVar(value=True)
+        self.auto_refresh_image_checkbox = ttk.Checkbutton(self.display_hist_frame, text='Auto Refresh', variable=self.auto_refresh_hist_display)
+        self.auto_refresh_image_checkbox.grid(row=2, column=3, sticky='w', pady=(4, 0))
+
+        # Bind events for auto-redraw
+        self.frame_slider.bind('<ButtonRelease-1>', self.auto_update_displays)
+        self.frame_slider.bind('<KeyRelease>', self.auto_update_displays)
+        self.black_level_entry.bind('<KeyRelease>', self.auto_update_displays)
+        self.white_level_entry.bind('<KeyRelease>', self.auto_update_displays)
+        self.sigma_entry.bind('<KeyRelease>', self.auto_update_displays)
+        self.gamma_entry.bind('<KeyRelease>', self.auto_update_displays)
 
     def update_frame_slider_state(self):
         # Disable slider if sum is checked, enable otherwise
@@ -181,6 +227,7 @@ class PeakFinderWidget:
         # Optionally reset frame index
         if self.display_sum.get():
             self.display_frame_idx.set(0)
+        self.auto_update_displays()
 
     def _peak_finder_controls(self, parent):
         # Settings group
@@ -213,8 +260,8 @@ class PeakFinderWidget:
         cutoff_row = ttk.Frame(settings_frame)
         cutoff_row.pack(fill='x', pady=2)
         ttk.Label(cutoff_row, text='Cutoff:', anchor='e', width=12).pack(side='left')
-        cutoff_entry = ttk.Entry(cutoff_row, textvariable=self.peak_finder_params.cutoff)
-        cutoff_entry.pack(side='left', fill='x', expand=True)
+        self.cutoff_entry = ttk.Entry(cutoff_row, textvariable=self.peak_finder_params.cutoff)
+        self.cutoff_entry.pack(side='left', fill='x', expand=True)
 
         # Mask Radius row
         r_row = ttk.Frame(settings_frame)
@@ -257,9 +304,9 @@ class PeakFinderWidget:
         # Size slider
         ttk.Label(display_frame, text='Size:').grid(row=2, column=0)
         self.display_size = tk.IntVar(value=10)
-        size_slider = ttk.Scale(display_frame, from_=2, to=50, orient='horizontal', variable=self.display_size)
-        size_slider.grid(row=2, column=1, sticky='ew')
-        size_slider.config(command=lambda val: self.display_size.set(int(float(val))))
+        self.size_slider = ttk.Scale(display_frame, from_=2, to=50, orient='horizontal', variable=self.display_size)
+        self.size_slider.grid(row=2, column=1, sticky='ew')
+        self.size_slider.config(command=self.set_coordinate_size)
         size_label = ttk.Label(display_frame, textvariable=self.display_size)
         size_label.grid(row=2, column=2, sticky='w')
 
@@ -270,6 +317,17 @@ class PeakFinderWidget:
         coords_checkbox.grid(row=0, column=3, sticky='w', pady=(4,0))
         masks_checkbox = ttk.Checkbutton(display_frame, text='Show Masks', variable=self.show_masks)
         masks_checkbox.grid(row=1, column=3, sticky='w', pady=(4,0))
+
+        # Trace changes to update image display
+        self.cutoff_entry.bind('<KeyRelease>', self.auto_update_histogram_display)
+        self.display_mode.trace_add('write', self.auto_update_image_display)
+        self.display_color.trace_add('write', self.auto_update_image_display)
+        self.show_coordinates.trace_add('write', self.auto_update_image_display)
+        self.show_masks.trace_add('write', self.auto_update_image_display)
+        self.ammount_slider.bind('<ButtonRelease-1>', self.auto_update_image_display)
+        self.ammount_slider.bind('<KeyRelease>', self.auto_update_image_display)
+        self.size_slider.bind('<ButtonRelease-1>', self.auto_update_image_display)
+        self.size_slider.bind('<KeyRelease>', self.auto_update_image_display)
 
     def _build_layout(self):
         # Menu bar
@@ -295,6 +353,69 @@ class PeakFinderWidget:
         file_path = self.file_path_var.get()
         if not file_path or not os.path.isfile(file_path):
             return
+        
+        # Check if this is a different file than currently loaded
+        current_file = getattr(self, '_current_file_path', None)
+        is_new_file = current_file != file_path
+        
+        if is_new_file:
+            # Clear peak finder cache for new file
+            old_peak_count = len(self.peak_finder.cache.coordinates) if hasattr(self.peak_finder.cache, 'coordinates') else 0
+            self.peak_finder.cache.coordinates = torch.empty((0, 2))
+            self.peak_finder.clear_masks()
+            
+            # Handle display windows - mark as inactive and create new ones
+            try:
+                if hasattr(self, 'image_display') and self.image_display:
+                    # Just set the flag to false and recreate - let the old one cleanup naturally
+                    self.show_image_display = False
+                    old_display = self.image_display
+                    self.image_display = ImageDisplay()
+                    self.image_display.callback("WM_DELETE_WINDOW", self.on_closing_display)
+                    self.display_refresh_button.config(text='Show')
+                    # Try to close the old one, but don't fail if it errors
+                    try:
+                        old_display.close()
+                    except Exception:
+                        pass  # Ignore errors from closing old display
+            except Exception as e:
+                print(f"Warning: Error handling image display: {e}")
+                # Ensure we have a working display
+                self.image_display = ImageDisplay()
+                self.image_display.callback("WM_DELETE_WINDOW", self.on_closing_display)
+                self.show_image_display = False
+                self.display_refresh_button.config(text='Show')
+                
+            try:
+                if hasattr(self, 'hist_display') and self.hist_display:
+                    # Just set the flag to false and recreate - let the old one cleanup naturally
+                    self.show_hist_display = False
+                    old_display = self.hist_display
+                    self.hist_display = HistogramDisplay()
+                    self.hist_display.callback("WM_DELETE_WINDOW", self.on_closing_hist)
+                    self.hist_refresh_button.config(text='Show')
+                    # Try to close the old one, but don't fail if it errors
+                    try:
+                        old_display.close()
+                    except Exception:
+                        pass  # Ignore errors from closing old display
+            except Exception as e:
+                print(f"Warning: Error handling histogram display: {e}")
+                # Ensure we have a working display
+                self.hist_display = HistogramDisplay()
+                self.hist_display.callback("WM_DELETE_WINDOW", self.on_closing_hist)
+                self.show_hist_display = False
+                self.hist_refresh_button.config(text='Show')
+            
+            # Clear FFT cache
+            self.fft_image_cache = None
+            
+            if old_peak_count > 0:
+                print(f"Loading new file: {os.path.basename(file_path)} - Cleared {old_peak_count} peaks from cache")
+            else:
+                print(f"Loading new file: {os.path.basename(file_path)}")
+            
+        self._current_file_path = file_path
         self.info_display.config(text='Loading...')
 
         def do_load(file_path):
@@ -310,7 +431,6 @@ class PeakFinderWidget:
                 self.frame_slider.config(from_=0, to=max(frames-1, 0))
                 self.update_frame_slider_state()
             self.root.after(0, update_gui)
-            
         if file_path is None:
             file_path = self.file_path_var.get()
             if not file_path or not os.path.isfile(file_path):
@@ -320,7 +440,7 @@ class PeakFinderWidget:
 
     def find_peaks(self):
         @timed
-        def do_find_peaks():
+        def target():
             image = self.get_image()
             if image is not None:
                 
@@ -344,14 +464,14 @@ class PeakFinderWidget:
                 self.peak_finder.add_mask(rectMask2)
                 self.peak_finder.threshold_abs = cutoff
                 self.peak_finder.find_peaks(image=image.torch())
-                self.root.after(0, self.refresh_display)
+                self.root.after(0, self.auto_update_image_display, image, self.get_title())
 
             self.root.after(0, self.reset_peak_finder_buttons)
 
         self.calc_btn.config(state='disabled')
         self.calc_btn.config(text='Calculating...')
         self.cont_btn.config(state='disabled')
-        threading.Thread(target=do_find_peaks, daemon=True).start()
+        threading.Thread(target=target, daemon=True).start()
 
     def get_image(self) -> Image:
         if self.image_handler.handle is None:
@@ -361,7 +481,7 @@ class PeakFinderWidget:
         idx = self.display_frame_idx.get()
         img = None
         if do_fft and self.fft_image_cache is None:
-            self.fft_image_cache = FFImageHandler()
+            self.fft_image_cache = FFTImageHandler()
             self.fft_image_cache.set_handle(self.image_handler.handle)
         if do_fft:
             if show_sum: img = self.fft_image_cache.get_sum()
@@ -384,23 +504,18 @@ class PeakFinderWidget:
         return image
     
     def get_title(self) -> str:
-        if self.display_sum.get():
-            return f"Sum - {self.state.filename or 'Untitled'}"
-        else:
-            return f"Frame {self.display_frame_idx.get()} - {self.state.filename or 'Untitled'}"
+        fft = "FFT: " if self.display_fft.get() else ""
+        filename = self.state.filename or 'Untitled'
+        idx = "Sum" if self.display_sum.get() else f"Frame {self.display_frame_idx.get()}"
+        return f"{fft}{idx} - {filename}"
 
     def refresh_display(self, image: Optional[Image] = None, title: Optional[str] = None):
-        def do_refresh_display(image: Image, title: str):
+        def target(image: Image, title: str):
             if image is None:
-                try: image = self.apply_image_transformations(self.get_image())
-                except: return
+                image = self.apply_image_transformations(self.get_image())
 
             if title is None:
                 title = self.get_title()
-
-            mode = self.display_mode.get()
-            color = self.display_color.get()
-            size = self.display_size.get()
 
             # Only show coordinates if checkbox is checked
             coordinates = None
@@ -420,34 +535,64 @@ class PeakFinderWidget:
                 overlay[..., 0] = torch.clamp(overlay[..., 0], 0, 1)
                 overlay[..., 1:3] = 0  # No green/blue
                 overlay[..., 3] = torch.clamp(overlay[..., 3], 0, 0.3)  # Max alpha
-            self.root.after(0, self.image_display.display, image, coordinates, overlay, mode, color, size, title)
-        
-        threading.Thread(target=do_refresh_display, args=(image, title), daemon=True).start()
+
+            def callback():
+                mode = self.display_mode.get()
+                color = self.display_color.get()
+                size = self.display_size.get()
+                self.image_display.display(image, coordinates, overlay, mode, color, size, title)
+
+            self.root.after(0, callback)
+            
+        if self.show_image_display:
+            threading.Thread(target=target, args=(image, title), daemon=True).start()
 
     def refresh_histogram(self, image: Optional[Image] = None, title: Optional[str] = None):
-        def do_refresh_histogram(image: Image, title: str):
+        def target(image: Image, title: str):
             if image is None:
                 image = self.apply_image_transformations(self.get_image())
 
             if title is None:
                 title = self.get_title()
 
-            cutoff=self.peak_finder_params.cutoff.get()
-            black=self.state.black_level.get()
-            white=self.state.white_level.get()
-            xscale=self.hist_x_axis.get()
-            yscale=self.hist_y_axis.get()
-            self.root.after(0, self.hist_display.display, image, cutoff, title, black, white, xscale, yscale)
-       
-        threading.Thread(target=do_refresh_histogram, args=(image, title), daemon=True).start()
+            def callback():
+                cutoff=self.peak_finder_params.cutoff.get()
+                black=self.state.black_level.get()
+                white=self.state.white_level.get()
+                xscale=self.hist_x_axis.get()
+                yscale=self.hist_y_axis.get()
+                self.hist_display.display(image, cutoff, title, black, white, xscale, yscale)
 
-    def update_image_display(self):
-        def do_update_image_display():
+            self.root.after(0, callback)
+            
+        if self.show_hist_display:
+            threading.Thread(target=target, args=(image, title), daemon=True).start()
+
+    def auto_update_image_display(self, *args):
+        if self.auto_refresh_image_display.get():
+            self.refresh_display()
+    
+    def auto_update_histogram_display(self, *args):
+        if self.auto_refresh_hist_display.get():
+            self.refresh_histogram()
+
+    def auto_update_displays(self, *args):
+        self.auto_update_image_display()
+        self.auto_update_histogram_display()  
+
+    def update_displays(self):
+        def target():
+            if self.show_image_display.get() or self.show_hist_display.get():
+                return
             image = self.apply_image_transformations(self.get_image())
-            title = self.get_title()
-            self.root.after(0, self.refresh_display, image, title)
-            self.root.after(0, self.refresh_histogram, image, title)
-        threading.Thread(target=do_update_image_display, daemon=True).start()
+            
+            def callback():
+                title = self.get_title()
+                self.refresh_display(image, title)
+                self.refresh_histogram(image, title)
+
+            self.root.after(0, callback)
+        threading.Thread(target=target, daemon=True).start()
 
     def update_slider_max(self, event=None):
         new_max = int(self.ammount_slider_max.get())
@@ -465,10 +610,14 @@ class PeakFinderWidget:
         self.cont_btn.config(state='normal')
         self.cont_btn.config(text='Continue')
 
+    def set_coordinate_size(self, value: float):
+        self.display_size.set(int(float(value)))
+        self.auto_update_image_display()
+
     def save_file(): pass
     def save_file_as(self): pass
 
-    def continue_fn(self): 
+    def continue_fn_old(self): 
         # TODO(Deogratias):
         #   1. Test what is fast and what is slow here O(#coordinates * #frames * (w*h)*log(w*h))
         #   2. Implement Threding tor the estractions and ffts
@@ -477,7 +626,20 @@ class PeakFinderWidget:
         #   5. seprate this whole file into sensible classes
         # TODO(Johannes):
         #   1. Make this work wit CTF estimation
-        #  
+        #
+        
+        # Ask user for output filename
+        output_filename = filedialog.asksaveasfilename(
+            title="Choose Output File for Complete Analysis Results",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialdir=os.path.dirname(self.state.filename) if self.state.filename else os.getcwd(),
+            initialfile=os.path.splitext(self.state.filename)[0] + "_analysis.txt" if self.state.filename else "analysis.txt"
+        )
+        
+        if not output_filename:  # User cancelled
+            return
+        
         class FitResult:
             def __init__(self, amplitude: float, sigma_x: float, sigma_y: float):
                 self.amplitude = amplitude
@@ -540,26 +702,205 @@ class PeakFinderWidget:
             timer = Timer()
             timer.start()
             results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                results = list(executor.map(extraction_worker, images, range(len(images))))
+            for i, image in enumerate(images):
+                result = extraction_worker(image, i)
+                results.append(result)
             elapsed = timer.stop()
             print(f"Extraction, fft and fitting took {elapsed:.3f} seconds.")
 
-            # Write results to file
-            out_path = os.path.join(os.path.dirname(self.state.filename or 'output.txt'), 'fitted_gaussians.txt')
+            # Write comprehensive results to single file
             try:
-                with open(out_path, 'w', encoding='utf-8') as f:
-                    f.write('Frame, ' + ', '.join([f'Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}' for i in range(len(self.peak_finder.cache.coordinates))]) + '\n')
-                    for line in results:
-                        f.write(', '.join([f'{res}' for res in line]) + '\n')
-                print(f"Results written to {out_path}")
+                with open(output_filename, 'w', encoding='utf-8') as f:
+                    # Write main header
+                    f.write("# Peak Analysis Results - Gaussian Fitting\n")
+                    f.write(f"# Generated on: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write("#" + "="*70 + "\n")
+                    f.write(f"# Source file: {self.state.filename or 'Unknown'}\n")
+                    f.write(f"# Pixel size: {self.apx_var.get():.6f} A/px\n")
+                    f.write(f"# Frame count: {len(images)}\n")
+                    f.write(f"# Peak count: {len(self.peak_finder.cache.coordinates)}\n")
+                    
+                    # Get image dimensions for coordinate calculations
+                    image = self.get_image()
+                    if image is not None:
+                        height, width = image.shape
+                        center_x = width / 2.0
+                        center_y = height / 2.0
+                        pixel_size = self.apx_var.get()
+                        
+                        f.write(f"# Image dimensions: {width}x{height} pixels\n")
+                        f.write("#" + "="*70 + "\n\n")
+                        
+                        # Section 1: Peak Coordinates and Reciprocal Space
+                        f.write("# SECTION 1: PEAK COORDINATES AND RECIPROCAL SPACE\n")
+                        f.write("#" + "-"*50 + "\n")
+                        f.write("# Peak_ID, X_Pixel, Y_Pixel, Gx_1_per_A, Gy_1_per_A, G_Magnitude_1_per_A, Resolution_Angstrom\n")
+                        
+                        ammount = len(self.peak_finder.cache.coordinates)
+                        for i, (x, y) in enumerate(self.peak_finder.cache.coordinates[0:ammount]):
+                            x_pixel = float(x)
+                            y_pixel = float(y)
+                            
+                            # Convert to reciprocal space
+                            dx_pixels = x_pixel - center_x
+                            dy_pixels = y_pixel - center_y
+                            gx = dx_pixels / (width * pixel_size)
+                            gy = dy_pixels / (height * pixel_size)
+                            g_magnitude = (gx**2 + gy**2)**0.5
+                            resolution = 1 / g_magnitude if g_magnitude != 0 else float('inf')
+                            
+                            f.write(f"{i+1}, {x_pixel:.2f}, {y_pixel:.2f}, {gx:.6f}, {gy:.6f}, {g_magnitude:.6f}, {resolution:.6f}\n")
+                        
+                        f.write("\n")
+                        
+                        # Section 2: Gaussian Fitting Results
+                        f.write("# SECTION 2: GAUSSIAN FITTING RESULTS\n")
+                        f.write("#" + "-"*50 + "\n")
+                        f.write("# Frame, " + ", ".join([f"Amplitude_{i+1}, Sigma_x_{i+1}, Sigma_y_{i+1}" for i in range(ammount)]) + "\n")
+                        
+                        for frame_idx, fit_results in results:
+                            line_data = [str(frame_idx)]
+                            for result in fit_results:
+                                line_data.extend([f"{result.amplitude:.6f}", f"{result.sigma_x:.6f}", f"{result.sigma_y:.6f}"])
+                            f.write(", ".join(line_data) + "\n")
+                    
+                print(f"Complete analysis results written to {output_filename}")
             except Exception as e:
                 print(f"Error writing results: {e}")
+            
             # Schedule GUI update on main thread
             self.root.after(0, lambda: self._on_continue_done())
 
         # Disable buttons and give feedback
         self.cont_btn.config(state='disabled', text='Working...')
+        self.calc_btn.config(state='disabled')
+        threading.Thread(target=run_extraction, daemon=True).start()
+
+    def continue_fn(self): 
+        # Simple brightness analysis - find the brightest pixel in each region for every frame
+        
+        # Ask user for output filename
+        output_filename = filedialog.asksaveasfilename(
+            title="Choose Output File for Complete Analysis Results",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialdir=os.path.dirname(self.state.filename) if self.state.filename else os.getcwd(),
+            initialfile=os.path.splitext(self.state.filename)[0] + "_analysis.txt" if self.state.filename else "analysis.txt"
+        )
+        
+        if not output_filename:  # User cancelled
+            return
+        
+        def extraction_worker(frame, idx, ammount) -> tuple[int, list[float]]:
+            timer = Timer()
+            timer.start()
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            frame_torch = torch.tensor(frame, dtype=torch.float32, device=device)
+            frame_fft = torch.fft.fft2(frame_torch)
+            frame_fft = torch.abs(torch.fft.fftshift(frame_fft)).cpu().numpy()
+            fft_time = timer.stop()
+            
+            timer.start()
+            max_values = []
+            for x, y in self.peak_finder.cache.coordinates[0:ammount]:
+                #print(int(x), int(y))
+                half_size = self.peak_finder_params.R.get() // 2
+                x_start = max(0, int(x) - half_size)
+                x_end = min(frame_fft.shape[1], int(x) + half_size)
+                y_start = max(0, int(y) - half_size)
+                y_end = min(frame_fft.shape[0], int(y) + half_size)
+                if x_start >= x_end or y_start >= y_end:
+                    #print(f"Skipping invalid region for peak at ({x}, {y}) in frame {idx}.")
+                    max_values.append(0.0)
+                    continue
+                extracted_region = frame_fft[y_start:y_end, x_start:x_end]
+                max_value = float(np.max(extracted_region))
+                max_values.append(max_value)
+            
+            analysis_time = timer.stop()
+            print(f"Frame {idx}: FFT: {fft_time:.3f} s, Max value analysis: {analysis_time:.3f} s.")
+            return idx, max_values
+
+        def run_extraction():
+            images = self.image_handler.handle
+            timer = Timer()
+            timer.start()
+            ammount = min(self.peak_finder_params.ammount.get(), len(self.peak_finder.cache.coordinates))
+            if ammount == 0:    
+                print("No peaks found to analyze.")
+                self._on_continue_done()
+                return  
+            
+            results = []
+            for i, image in enumerate(images):
+                result = extraction_worker(image, i, ammount)
+                results.append(result)
+            
+            elapsed = timer.stop()
+            print(f"Brightness analysis took {elapsed:.3f} seconds.")
+
+            # Write comprehensive results to single file
+            try:
+                with open(output_filename, 'w', encoding='utf-8') as f:
+                    # Write main header
+                    f.write("# Peak Analysis Results - Brightness Analysis\n")
+                    f.write(f"# Generated on: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write("#" + "="*70 + "\n")
+                    f.write(f"# Source file: {self.state.filename or 'Unknown'}\n")
+                    f.write(f"# Pixel size: {self.apx_var.get():.6f} A/px\n")
+                    f.write(f"# Frame count: {len(results)}\n")
+                    f.write(f"# Peak count: {ammount}\n")
+                    
+                    # Get image dimensions for coordinate calculations
+                    image = self.get_image()
+                    if image is not None:
+                        height, width = image.shape
+                        center_x = width / 2.0
+                        center_y = height / 2.0
+                        pixel_size = self.apx_var.get()
+                        
+                        f.write(f"# Image dimensions: {width}x{height} pixels\n")
+                        f.write("#" + "="*70 + "\n\n")
+                        
+                        # Section 1: Peak Coordinates and Reciprocal Space
+                        f.write("# SECTION 1: PEAK COORDINATES AND RECIPROCAL SPACE\n")
+                        f.write("#" + "-"*50 + "\n")
+                        f.write("# Peak_ID, X_Pixel, Y_Pixel, Gx_1_per_A, Gy_1_per_A, G_Magnitude_1_per_A, Resolution_Angstrom\n")
+                        
+                        for i, (x, y) in enumerate(self.peak_finder.cache.coordinates[0:ammount]):
+                            x_pixel = float(x)
+                            y_pixel = float(y)
+                            
+                            # Convert to reciprocal space
+                            dx_pixels = x_pixel - center_x
+                            dy_pixels = y_pixel - center_y
+                            gx = dx_pixels / (width * pixel_size)
+                            gy = dy_pixels / (height * pixel_size)
+                            g_magnitude = (gx**2 + gy**2)**0.5
+                            resolution = 1 / g_magnitude if g_magnitude != 0 else float('inf')
+                            
+                            f.write(f"{i+1}, {x_pixel:.2f}, {y_pixel:.2f}, {gx:.6f}, {gy:.6f}, {g_magnitude:.6f}, {resolution:.6f}\n")
+                        
+                        f.write("\n")
+                        
+                        # Section 2: Brightness Analysis Results
+                        f.write("# SECTION 2: BRIGHTNESS ANALYSIS RESULTS\n")
+                        f.write("#" + "-"*50 + "\n")
+                        f.write("# Frame, " + ", ".join([f"Peak_{i+1}" for i in range(ammount)]) + "\n")
+                        
+                        for frame_idx, max_values in results:
+                            line = f"{frame_idx}, " + ", ".join([f"{val:.6f}" for val in max_values]) + "\n"
+                            f.write(line)
+                    
+                print(f"Complete brightness analysis results written to {output_filename}")
+            except Exception as e:
+                print(f"Error writing results: {e}")
+            
+            # Schedule GUI update on main thread
+            self.root.after(0, lambda: self._on_continue_done())
+
+        # Disable buttons and give feedback
+        self.cont_btn.config(state='disabled', text='Analyzing...')
         self.calc_btn.config(state='disabled')
         threading.Thread(target=run_extraction, daemon=True).start()
 
@@ -578,6 +919,20 @@ class PeakFinderWidget:
         self.image_display.close()
         self.hist_display.close()
         self.root.destroy()
+    
+    def on_closing_display(self):
+        self.show_image_display = False
+        self.display_refresh_button.config(text='Show')
+        self.image_display.close()
+        self.image_display = ImageDisplay()
+        self.image_display.callback("WM_DELETE_WINDOW", self.on_closing_display)
+
+    def on_closing_hist(self):
+        self.show_hist_display = False
+        self.hist_refresh_button.config(text='Show')
+        self.hist_display.close()
+        self.hist_display = HistogramDisplay()
+        self.hist_display.callback("WM_DELETE_WINDOW", self.on_closing_hist)
 
     def on_precalc_sum(self):
         if self.image_handler.handle is None:
@@ -590,7 +945,7 @@ class PeakFinderWidget:
             return
         if self.precalc_fft_var.get():
             if self.fft_image_cache is None:
-                self.fft_image_cache = FFImageHandler()
+                self.fft_image_cache = FFTImageHandler()
                 self.fft_image_cache.set_handle(self.image_handler.handle)
             threading.Thread(target=self.fft_image_cache.precompute, daemon=True).start()
 
